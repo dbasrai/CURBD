@@ -235,32 +235,40 @@ def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     out['iTarget'] = iTarget
     out['iNonTarget'] = iNonTarget
     out['params'] = out_params
-    fig.clear()
-    ax = fig.add_subplot(gs[0, 0])
-    ax.axis('off')
-    ax.imshow(Adata[iTarget, :])
-    ax.set_title('real rates')
+    if fig:
+        fig.clear()
+    else:
+        plt.rcParams.update({'font.size': 6})
+        fig = plt.figure()
+        fig.tight_layout()
+        fig.subplots_adjust(hspace=0.4, wspace=0.4)
+        gs = GridSpec(nrows=2, ncols=4)
 
-    ax = fig.add_subplot(gs[0, 1])
-    ax.imshow(RNN, aspect='auto')
-    ax.set_title('model rates')
-    ax.axis('off')
+        ax = fig.add_subplot(gs[0, 0])
+        ax.axis('off')
+        ax.imshow(Adata[iTarget, :])
+        ax.set_title('real rates')
 
-    ax = fig.add_subplot(gs[1, 0])
-    ax.plot(pVars)
-    ax.set_ylabel('pVar')
+        ax = fig.add_subplot(gs[0, 1])
+        ax.imshow(RNN, aspect='auto')
+        ax.set_title('model rates')
+        ax.axis('off')
 
-    ax = fig.add_subplot(gs[1, 1])
-    ax.plot(chi2s)
-    ax.set_ylabel('chi2s')
+        ax = fig.add_subplot(gs[1, 0])
+        ax.plot(pVars)
+        ax.set_ylabel('pVar')
 
-    ax = fig.add_subplot(gs[:, 2:4])
-    idx = npr.choice(range(len(iTarget)))
-    ax.plot(tRNN, RNN[iTarget[idx], :])
-    ax.plot(tData, Adata[iTarget[idx], :])
-    ax.set_title(nRun)
-    fig.show()
-    plt.pause(0.05)
+        ax = fig.add_subplot(gs[1, 1])
+        ax.plot(chi2s)
+        ax.set_ylabel('chi2s')
+
+        ax = fig.add_subplot(gs[:, 2:4])
+        idx = npr.choice(range(len(iTarget)))
+        ax.plot(tRNN, RNN[iTarget[idx], :])
+        ax.plot(tData, Adata[iTarget[idx], :])
+        ax.set_title(nRun)
+        fig.show()
+        plt.pause(0.05)
 
 
     return out
