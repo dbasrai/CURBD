@@ -235,15 +235,59 @@ def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     out['iTarget'] = iTarget
     out['iNonTarget'] = iNonTarget
     out['params'] = out_params
+
+    return out
+
+def simulate(model, t):
+    #randomly initialize from initial condition of training data
+    #H = Adata[:, np.choice(len(
+    H = Adata[:, 0, np.newaxis]
+    RNN[:, 0, np.newaxis] = nonLinearity(H)
+    # variables to track when to update the J matrix since the RNN and
+    # data can have different dt values
+    tLearn = 0  # keeps track of current time
+    iLearn = 0  # keeps track of last data point learned
+    chi2 = 0.0
+
+    for tt in range(1, len(tRNN)):
+        # update current learning time
+        tLearn += dtRNN
+        # check if the current index is a reset point. Typically this won't
+        # be used, but it's an option for concatenating multi-trial data
+        if tt in resetPoints:
+            timepoint = math.floor(tt / dtFactor)
+            H = Adata[:, timepoint]
+        # compute next RNN step
+        RNN[:, tt, np.newaxis] = nonLinearity(H)
+        JR = (J.dot(RNN[:, tt]).reshape((number_units, 1)) +
+              inputWN[:, tt, np.newaxis])
+        H = H + dtRNN*(-H + JR)/tauRNN
+        # check if the RNN time coincides with a data point to update J
+        if tLearn >= dtData:
+            tLearn = 0
+            err = RNN[:, tt, np.newaxis] - Adata[:, iLearn, np.newaxis]
+            iLearn = iLearn + 1
+            # update chi2 using this error
+            chi2 += np.mean(err ** 2)
+
+            if nRun < nRunTrain:
+                r_slice = RNN[iTarget, tt].reshape(number_learn, 1)
+                k = PJ.dot(r_slice)
+                rPr = (r_slice).T.dot(k)[0, 0]
+                c = 1.0/(1.0 + rPr)
+                PJ = PJ - c*(k.dot(k.T))
+                J[:, iTarget.flatten()] = J[:, iTarget.reshape((number_units))] - c*np.outer(err.flatten(), k.flatten())
+
+    rModelSample = RNN[iTarget, :][:, iModelSample]
+    distance = np.linalg.norm(Adata[iTarget, :] - rModelSample)
+    pVar = 1 - (distance / (math.sqrt(len(iTarget) * len(tData))
+                * stdData)) ** 2
+    pVars.append(pVar)
+    chi2s.append(chi2)
+    if verbose:
+        print('trial=%d pVar=%f chi2=%f' % (nRun, pVar, chi2))
     if fig:
         fig.clear()
-    else:
-        plt.rcParams.update({'font.size': 6})
-        fig = plt.figure()
-        fig.tight_layout()
-        fig.subplots_adjust(hspace=0.4, wspace=0.4)
-        gs = GridSpec(nrows=2, ncols=4)
-
         ax = fig.add_subplot(gs[0, 0])
         ax.axis('off')
         ax.imshow(Adata[iTarget, :])
@@ -271,7 +315,52 @@ def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
         plt.pause(0.05)
 
 
-    return out
+
+
+def plotFit(model):
+    pVars = model['pVars']
+    RNN = model['RNN']
+    tRNN = model['tRNN']
+    Adata=model['Adata']
+    iTarget = model['iTarget']
+    tData = model['tData']
+    chi2s = model['chi2s']
+
+
+
+    plt.rcParams.update({'font.size': 6})
+    fig = plt.figure()
+    fig.tight_layout()
+    fig.subplots_adjust(hspace=0.4, wspace=0.4)
+    gs = GridSpec(nrows=2, ncols=4)
+
+    ax = fig.add_subplot(gs[0, 0])
+    ax.axis('off')
+    ax.imshow(Adata, aspect='auto')
+    ax.set_title('real rates')
+
+    ax = fig.add_subplot(gs[0, 1])
+    ax.imshow(RNN, aspect='auto')
+    ax.set_title('model rates')
+    ax.axis('off')
+
+    ax = fig.add_subplot(gs[1, 0])
+    ax.plot(pVars)
+    ax.set_ylabel('pVar')
+
+    ax = fig.add_subplot(gs[1, 1])
+    ax.plot(chi2s)
+    ax.set_ylabel('chi2s')
+
+    ax = fig.add_subplot(gs[:, 2:4])
+    idx = npr.choice(range(len(iTarget)))
+    ax.plot(tData, Adata[iTarget[idx], :], label='true')
+    ax.plot(tRNN, RNN[iTarget[idx], :], label='predicted')
+    ax.legend()
+    fig.show()
+    plt.pause(0.05)
+
+
 
 
 def threeRegionSim(number_units=100,
