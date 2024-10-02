@@ -18,6 +18,10 @@ import numpy.linalg
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
+from tqdm import tqdm
+
+from .utils import *
+
 def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         tauWN=0.1, ampInWN=0.01, nRunTrain=2000,
                         nRunFree=10, P0=1.0,
@@ -38,8 +42,7 @@ def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     dtData: float
         time step (in s) of the training data
     dtFactor: float
-        number of interpolation steps for RNN
-    g: float
+        number of interpolation steps for RNN g: float
         instability (chaos); g<1=damped, g>1=chaotic
     tauRNN: float
         decay constant of RNN units
@@ -238,82 +241,114 @@ def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
 
     return out
 
-def simulate(model, t):
-    #randomly initialize from initial condition of training data
-    #H = Adata[:, np.choice(len(
-    H = Adata[:, 0, np.newaxis]
-    RNN[:, 0, np.newaxis] = nonLinearity(H)
-    # variables to track when to update the J matrix since the RNN and
-    # data can have different dt values
-    tLearn = 0  # keeps track of current time
-    iLearn = 0  # keeps track of last data point learned
-    chi2 = 0.0
 
+def simulate_opto(model,t,wn_t):
+    assert np.max(wn_t) <= t, print('issue')
+    dtRNN = model['dtRNN']
+    params = model['params']
+    tauWN = params['tauWN']
+    tauRNN = params['tauRNN']
+    number_units = params['number_units']
+    ampInWN = params['ampInWN']
+    nonLinearity = params['nonLinearity']
+    J = model['J']
+    Adata = model['Adata']
+    region1 = model['regions']['region1']
+    region2 = model['regions']['region2']
+
+    dt_wnt = wn_t / dtRNN
+    dt_wnt = dt_wnt.astype(int)
+
+    wn_t_logical = bounds2Logical(dt_wnt, duration=int((t/dtRNN)+1))
+
+    tRNN = np.arange(0, t+dtRNN, dtRNN)
+    ampWN = math.sqrt(tauWN/dtRNN)
+    iWN = ampWN * npr.randn(number_units, len(tRNN))
+    inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
-        # update current learning time
-        tLearn += dtRNN
+        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+    inputWN = ampInWN * inputWN
+    
+    #output simulation
+    sim = np.zeros((number_units, len(tRNN))) 
+
+    #randomly initialize based on data
+    H = Adata[:, np.random.choice(len(Adata))]
+    if H.ndim==1:
+        sim[:,0] = nonLinearity(H)
+    else:
+        sim[:, 0, np.newaxis] = nonLinearity(H)
+
+    for tt in tqdm(range(1, len(tRNN))):
         # check if the current index is a reset point. Typically this won't
         # be used, but it's an option for concatenating multi-trial data
-        if tt in resetPoints:
-            timepoint = math.floor(tt / dtFactor)
-            H = Adata[:, timepoint]
-        # compute next RNN step
-        RNN[:, tt, np.newaxis] = nonLinearity(H)
-        JR = (J.dot(RNN[:, tt]).reshape((number_units, 1)) +
+        # computoe next RNN step
+            
+        if H.ndim==1:
+            sim[:,tt] = nonLinearity(H)
+        else:
+            sim[:, tt, np.newaxis] = nonLinearity(H)
+        if wn_t_logical[tt]:
+            H[region2]=0
+            sim[:,tt] = nonLinearity(H)
+            
+        
+        #sim[:, tt, np.newaxis] = nonLinearity(H)
+        JR = (J.dot(sim[:, tt]).reshape((number_units, 1)) +
               inputWN[:, tt, np.newaxis])
+        JR = np.squeeze(JR)
         H = H + dtRNN*(-H + JR)/tauRNN
-        # check if the RNN time coincides with a data point to update J
-        if tLearn >= dtData:
-            tLearn = 0
-            err = RNN[:, tt, np.newaxis] - Adata[:, iLearn, np.newaxis]
-            iLearn = iLearn + 1
-            # update chi2 using this error
-            chi2 += np.mean(err ** 2)
 
-            if nRun < nRunTrain:
-                r_slice = RNN[iTarget, tt].reshape(number_learn, 1)
-                k = PJ.dot(r_slice)
-                rPr = (r_slice).T.dot(k)[0, 0]
-                c = 1.0/(1.0 + rPr)
-                PJ = PJ - c*(k.dot(k.T))
-                J[:, iTarget.flatten()] = J[:, iTarget.reshape((number_units))] - c*np.outer(err.flatten(), k.flatten())
+    return sim
 
-    rModelSample = RNN[iTarget, :][:, iModelSample]
-    distance = np.linalg.norm(Adata[iTarget, :] - rModelSample)
-    pVar = 1 - (distance / (math.sqrt(len(iTarget) * len(tData))
-                * stdData)) ** 2
-    pVars.append(pVar)
-    chi2s.append(chi2)
-    if verbose:
-        print('trial=%d pVar=%f chi2=%f' % (nRun, pVar, chi2))
-    if fig:
-        fig.clear()
-        ax = fig.add_subplot(gs[0, 0])
-        ax.axis('off')
-        ax.imshow(Adata[iTarget, :])
-        ax.set_title('real rates')
 
-        ax = fig.add_subplot(gs[0, 1])
-        ax.imshow(RNN, aspect='auto')
-        ax.set_title('model rates')
-        ax.axis('off')
 
-        ax = fig.add_subplot(gs[1, 0])
-        ax.plot(pVars)
-        ax.set_ylabel('pVar')
+def simulate(model, t):
+    #randomly initialize from initial condition of training data
+    dtRNN = model['dtRNN']
+    params = model['params']
+    tauWN = params['tauWN']
+    tauRNN = params['tauRNN']
+    number_units = params['number_units']
+    ampInWN = params['ampInWN']
+    nonLinearity = params['nonLinearity']
+    J = model['J']
+    Adata = model['Adata']
 
-        ax = fig.add_subplot(gs[1, 1])
-        ax.plot(chi2s)
-        ax.set_ylabel('chi2s')
+    tRNN = np.arange(0, t+dtRNN, dtRNN)
+    mpWN = math.sqrt(tauWN/dtRNN)
+    iWN = ampWN * npr.randn(number_units, len(tRNN))
+    inputWN = np.ones((number_units, len(tRNN)))
+    for tt in range(1, len(tRNN)):
+        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+    inputWN = ampInWN * inputWN
+    
+    #output simulation
+    sim = np.zeros((number_units, len(tRNN))) 
 
-        ax = fig.add_subplot(gs[:, 2:4])
-        idx = npr.choice(range(len(iTarget)))
-        ax.plot(tRNN, RNN[iTarget[idx], :])
-        ax.plot(tData, Adata[iTarget[idx], :])
-        ax.set_title(nRun)
-        fig.show()
-        plt.pause(0.05)
+    #randomly initialize based on data
+    H = Adata[:, np.random.choice(len(Adata))]
+    if H.ndim==1:
+        sim[:,0] = nonLinearity(H)
+    else:
+        sim[:, 0, np.newaxis] = nonLinearity(H)
 
+    for tt in tqdm(range(1, len(tRNN))):
+        # check if the current index is a reset point. Typically this won't
+        # be used, but it's an option for concatenating multi-trial data
+        # computoe next RNN step
+        if H.ndim==1:
+            sim[:,tt] = nonLinearity(H)
+        else:
+            sim[:, tt, np.newaxis] = nonLinearity(H)
+        
+        #sim[:, tt, np.newaxis] = nonLinearity(H)
+        JR = (J.dot(sim[:, tt]).reshape((number_units, 1)) +
+              inputWN[:, tt, np.newaxis])
+        JR = np.squeeze(JR)
+        H = H + dtRNN*(-H + JR)/tauRNN
+
+    return sim
 
 
 
@@ -321,11 +356,14 @@ def plotFit(model):
     pVars = model['pVars']
     RNN = model['RNN']
     tRNN = model['tRNN']
+    dtFactor = model['params']['dtFactor']
     Adata=model['Adata']
     iTarget = model['iTarget']
     tData = model['tData']
     chi2s = model['chi2s']
 
+    r2 = weighted_r2(Adata.T, RNN[:, ::dtFactor].T)
+    print(r2)
 
 
     plt.rcParams.update({'font.size': 6})
@@ -357,7 +395,6 @@ def plotFit(model):
     ax.plot(tData, Adata[iTarget[idx], :], label='true')
     ax.plot(tRNN, RNN[iTarget[idx], :], label='predicted')
     ax.legend()
-    fig.show()
     plt.pause(0.05)
 
 

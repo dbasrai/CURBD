@@ -31,15 +31,15 @@ from src.CURBD import curbd
 session_path = '../../../data/co/co7/co7_12072023'
 session = MPOptoClass(session_path)
 
-binsize=10
+binsize=5
 sigma=binsize*10
-dtFactor=10
-tauRNN=.01
-ampInWN=.0001
-nRunTrain=1000
+dtFactor=5
+tauRNN=.03
+ampInWN=.001
+nRunTrain=50
 
 
-reg1, reg2 = session.smoother(bounds=session.climbing_bounds[:6,:], 
+reg1, reg2 = session.smoother(bounds=session.climbing_bounds, 
         sigma=sigma, binsize=binsize, concat=False, smooth_type='causal')
 
 reg1_stitch = np.vstack(reg1)
@@ -58,8 +58,8 @@ model = curbd.trainMultiRegionRNN(activity,
         regions=regions,
         nRunTrain=nRunTrain,
         verbose=True,
-        nRunFree=20,
+        nRunFree=2,
         plotStatus=False)
 
-pdump(model, f'../../../picklejar/curbd_model_{dtFactor}dtFactor_{tauRNN}tauRNN_{ampInWN}ampInWN.pickle')
+pdump(model, f'../../../picklejar/curbd_model_{binsize}binsize_{dtFactor}dtFactor_{tauRNN}tauRNN_{ampInWN}ampInWN.pickle')
 print('finish!')
