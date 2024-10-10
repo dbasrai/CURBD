@@ -1,5 +1,13 @@
-from src.MPOptoClass import *
-from src.CURBD.utils import *
+from src.utils.gen_utils import *
+from src.utils.filters import *
+from src.experiment import *
+from src.wiener_filter import *
+from src.modeller import *
+from src.MPRecordClass import *
+from src.ReachingClass import *
+from src.MPOptoCtrlClass import *
+from src.analysis import *
+from src.plotter import *
 import scipy
 import copy
 import time
@@ -23,26 +31,20 @@ from src.CURBD import curbd
 
 session_path = '../../../data/co/co9/co9_12122023'
 session = MPOptoClass(session_path)
-session_name = session_path.split('/')[-1]
 
 binsize=5
-sigma=binsize*5
-dtFactor=10
+sigma=binsize*20
+dtFactor=5
 tauRNN=.03
-ampInWN=.01
-nRunTrain=100
-num_reset=100
+ampInWN=.001
+nRunTrain=500
 
 
-bounds = session.climbing_bounds[:30,:]
-reg1, reg2 = session.smoother(bounds=bounds,  binsize=binsize, concat=True,
-        sigma=sigma, smooth_type='causal')
-#reg1, reg2 = session.binner(bounds=bounds,  binsize=binsize, concat=True)
-
+reg1, reg2 = session.smoother(bounds=session.climbing_bounds, 
+        sigma=sigma, binsize=binsize, concat=True, smooth_type='both')
 
 activity = np.hstack((reg1, reg2))
-scaler = StandardScaler()
-z_activity = scaler.fit_transform(activity)
+z_activity = StandardScaler().fit_transform(activity)
 z_activity = z_activity.T
 
 regions={}
@@ -50,15 +52,7 @@ regions['region1'] = np.arange(0, session.num_region1)
 regions['region2'] = np.arange(session.num_region1, session.num_region1 +
         session.num_region2)
 
-seams = getSeamsFromBounds(bounds, binsize=binsize/dtFactor)
-temp_output=[]
-start = 0
-for idx in np.arange(len(seams)):
-    end = seams[idx]
-    temp_output.append(np.arange(start, end, num_reset))
-    start=end
-resetPoints = np.concatenate(temp_output)
-model = curbd.trainBioMultiRegionRNN(z_activity, 
+model = curbd.trainMultiRegionRNN(z_activity, 
         dtData=binsize/1000,
         dtFactor=dtFactor,
         tauRNN=tauRNN,
@@ -67,8 +61,7 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         nRunTrain=nRunTrain,
         verbose=True,
         nRunFree=5,
-        resetPoints=resetPoints,
         plotStatus=False)
-model['scaler'] = scaler
-pdump(model, f'../../../picklejar/curbdTest_{session_name}_{binsize}binsize_{dtFactor}dtFactor_{tauRNN}tauRNN_{ampInWN}ampInWN.pickle')
+
+pdump(model, f'../../../picklejar/curbdco9_{binsize}binsize_{dtFactor}dtFactor_{tauRNN}tauRNN_{ampInWN}ampInWN.pickle')
 print('finish!')

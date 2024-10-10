@@ -26,23 +26,22 @@ session = MPOptoClass(session_path)
 session_name = session_path.split('/')[-1]
 
 binsize=5
-sigma=binsize*5
-dtFactor=10
+sigma=binsize*10
+dtFactor=5
 tauRNN=.03
-ampInWN=.01
-nRunTrain=100
-num_reset=100
+ampInWN=.001
+nRunTrain=10
+num_reset=25
 
 
-bounds = session.climbing_bounds[:30,:]
+bounds = session.climbing_bounds[:5,:]
 reg1, reg2 = session.smoother(bounds=bounds,  binsize=binsize, concat=True,
         sigma=sigma, smooth_type='causal')
 #reg1, reg2 = session.binner(bounds=bounds,  binsize=binsize, concat=True)
 
 
 activity = np.hstack((reg1, reg2))
-scaler = StandardScaler()
-z_activity = scaler.fit_transform(activity)
+z_activity = StandardScaler().fit_transform(activity)
 z_activity = z_activity.T
 
 regions={}
@@ -50,7 +49,7 @@ regions['region1'] = np.arange(0, session.num_region1)
 regions['region2'] = np.arange(session.num_region1, session.num_region1 +
         session.num_region2)
 
-seams = getSeamsFromBounds(bounds, binsize=binsize/dtFactor)
+seams = getSeamsFromBounds(bounds, binsize=1)
 temp_output=[]
 start = 0
 for idx in np.arange(len(seams)):
@@ -69,6 +68,6 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         nRunFree=5,
         resetPoints=resetPoints,
         plotStatus=False)
-model['scaler'] = scaler
+
 pdump(model, f'../../../picklejar/curbdTest_{session_name}_{binsize}binsize_{dtFactor}dtFactor_{tauRNN}tauRNN_{ampInWN}ampInWN.pickle')
 print('finish!')

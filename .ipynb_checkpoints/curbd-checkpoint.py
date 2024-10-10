@@ -297,8 +297,8 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     if regions is None:
         regions = {}
     else:
-        num_reg1 = len(regions['region1'])
-        num_reg2 = len(regions['region2'])
+        idx_reg1 = regions['region1']
+        idx_reg2 = regions['region2']
 
     number_units = activity.shape[0]
     number_learn = activity.shape[0]
@@ -397,10 +397,12 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                     c = 1.0/(1.0 + rPr)
                     PJ = PJ - c*(k.dot(k.T))
                     J[:, iTarget.flatten()] = J[:, iTarget.reshape((number_units))] - c*np.outer(err.flatten(), k.flatten())
-                    mask = J[:num_reg1, num_reg1:] < 0
-                    J[:num_reg1, num_reg1:][mask] =0
-                    mask = J[num_reg1:, :num_reg1] < 0
-                    J[num_reg1:, :num_reg1][mask] =0
+                    for i in idx_reg1:
+                        for j in idx_reg2:
+                            if J[i, j] < 0:
+                                J[i,j] = 0
+                            if J[j, i] < 0:
+                                J[j, i] = 0
 
         rModelSample = RNN[iTarget, :][:, iModelSample]
         distance = np.linalg.norm(Adata[iTarget, :] - rModelSample)
@@ -645,6 +647,20 @@ def simulate(model, t):
 
     return sim
 
+def Jmask(model):
+    idx_reg1 = model['regions']['region1']
+    idx_reg2 = model['regions']['region2']
+    total = len(idx_reg1) + len(idx_reg2)
+    mask = np.ones((total, total))
+    mask[idx_reg1, idx_reg1] = 0
+    return mask
+    mask[idx_reg2, idx_reg2] = 0
+    return mask
+
+
+
+
+
 
 def plotFit(model):
     pVars = model['pVars']
@@ -660,7 +676,7 @@ def plotFit(model):
     print(r2)
 
 
-    #plt.rcParams.update({'font.size': 6})
+    plt.rcParams.update({'font.size': 6})
     fig = plt.figure()
     fig.tight_layout()
     fig.subplots_adjust(hspace=0.4, wspace=0.4)

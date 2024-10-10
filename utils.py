@@ -46,3 +46,7 @@ def weighted_r2(x, xhat, remove_lows=True):
     variance = np.var(xhat, axis=0)
     return np.average(score, weights=variance)
 
+def getSeamsFromBounds(bounds, binsize=1):
+    #binsize is if you want to downsample
+    return np.cumsum(np.diff(bounds, axis=1)//binsize)
+ 
