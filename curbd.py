@@ -598,14 +598,15 @@ def simulate_opto(model,t,wn_t):
 
 
 
-def simulate(model, t):
+def simulate(model, t, ampInWN=None):
     #randomly initialize from initial condition of training data
     dtRNN = model['dtRNN']
     params = model['params']
     tauWN = params['tauWN']
     tauRNN = params['tauRNN']
     number_units = params['number_units']
-    ampInWN = params['ampInWN']
+    if ampInWN is None:
+        ampInWN = params['ampInWN']
     nonLinearity = params['nonLinearity']
     J = model['J']
     Adata = model['Adata']
@@ -615,7 +616,8 @@ def simulate(model, t):
     iWN = ampWN * npr.randn(number_units, len(tRNN))
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
-        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+        inputWN[:, tt] = iWN[:, tt] 
+        #+ (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
     inputWN = ampInWN * inputWN
     
     #output simulation
@@ -648,7 +650,7 @@ def simulate(model, t):
 
 def plotFit(model):
     pVars = model['pVars']
-    RNN = model['RNN']
+    RN = model['RNN']
     tRNN = model['tRNN']
     dtFactor = model['params']['dtFactor']
     Adata=model['Adata']
