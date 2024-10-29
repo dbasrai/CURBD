@@ -472,12 +472,15 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     return out
 
 
-def simulate_optoinput(model,t,wn_t, optoamp=.001, ampInWN=None):
+def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
+        tauWN=None):
     assert np.max(wn_t) <= t, print('issue')
     dtRNN = model['dtRNN']
     params = model['params']
-    tauWN = params['tauWN']
-    tauRNN = params['tauRNN']
+    if tauWN is None:
+        tauWN = params['tauWN']
+    if tauRNN is None:
+        tauRNN = params['tauRNN']
     number_units = params['number_units']
     if ampInWN is None:
         ampInWN = params['ampInWN']
@@ -498,13 +501,14 @@ def simulate_optoinput(model,t,wn_t, optoamp=.001, ampInWN=None):
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
         inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+        #inputWN[:, tt] = iWN[:, tt]
     inputWN = ampInWN * inputWN
     wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
 
     for i in region2:
         for j in wn_idx:
             curr = inputWN[i,j]
-            inputWN[i,j]=curr - optoamp
+            inputWN[i,j]=curr - optoamp*np.exp(-(dtRNN/tauWN))
 
     #output simulation
     sim = np.zeros((number_units, len(tRNN))) 
@@ -537,7 +541,7 @@ def simulate_optoinput(model,t,wn_t, optoamp=.001, ampInWN=None):
 
 
 
-def simulate_opto(model,t,wn_t):
+def depprec_simulate_opto(model,t,wn_t):
     assert np.max(wn_t) <= t, print('issue')
     dtRNN = model['dtRNN']
     params = model['params']
@@ -598,12 +602,14 @@ def simulate_opto(model,t,wn_t):
 
 
 
-def simulate(model, t, ampInWN=None):
+def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     #randomly initialize from initial condition of training data
     dtRNN = model['dtRNN']
     params = model['params']
-    tauWN = params['tauWN']
-    tauRNN = params['tauRNN']
+    if tauWN is None:
+        tauWN = params['tauWN']
+    if tauRNN is None:
+        tauRNN = params['tauRNN']
     number_units = params['number_units']
     if ampInWN is None:
         ampInWN = params['ampInWN']
@@ -616,8 +622,9 @@ def simulate(model, t, ampInWN=None):
     iWN = ampWN * npr.randn(number_units, len(tRNN))
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
-        inputWN[:, tt] = iWN[:, tt] 
-        #+ (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+        #inputWN[:, tt] = iWN[:, tt] 
+
+        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
     inputWN = ampInWN * inputWN
     
     #output simulation
