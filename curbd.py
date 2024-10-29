@@ -471,7 +471,6 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
 
     return out
 
-
 def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
         tauWN=None):
     assert np.max(wn_t) <= t, print('issue')
@@ -498,17 +497,18 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
     tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
     iWN = ampWN * npr.randn(number_units, len(tRNN))
+    optoval = optoamp * -1
     inputWN = np.ones((number_units, len(tRNN)))
+
+    wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
     for tt in range(1, len(tRNN)):
         inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
-        #inputWN[:, tt] = iWN[:, tt]
     inputWN = ampInWN * inputWN
-    wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
 
     for i in region2:
         for j in wn_idx:
             curr = inputWN[i,j]
-            inputWN[i,j]=curr - optoamp*np.exp(-(dtRNN/tauWN))
+            inputWN[i,j]=curr - optoamp
 
     #output simulation
     sim = np.zeros((number_units, len(tRNN))) 
