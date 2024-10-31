@@ -497,18 +497,29 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
     tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
     iWN = ampWN * npr.randn(number_units, len(tRNN))
-    optoval = optoamp * -1
+    wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
+    for i in wn_idx:
+        iWN[region2, i] = ampWN * optoamp * (npr.randn(len(region2)) - 2)
     inputWN = np.ones((number_units, len(tRNN)))
 
-    wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
-    for tt in range(1, len(tRNN)):
-        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
-    inputWN = ampInWN * inputWN
 
-    for i in region2:
-        for j in wn_idx:
-            curr = inputWN[i,j]
-            inputWN[i,j]=curr - optoamp
+    for tt in range(1, len(tRNN)):
+        if tauWN==0:
+            inputWN[:,tt] = iWN[:,tt]
+        else:
+            inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+
+    inputWN = ampInWN * inputWN
+##    for idx, tt in enumerate(wn_idx):
+#        for rdx, i in enumerate(region2):
+#            inputWN[i,tt] = iOpto[rdx, idx]
+#            inputWN[i,tt] = inputWN[i,tt]
+
+
+    #for i in region2:
+    #    for j in wn_idx:
+    #        curr = inputWN[i,j]
+    #        inputWN[i,j]=curr - optoamp
 
     #output simulation
     sim = np.zeros((number_units, len(tRNN))) 
@@ -538,34 +549,30 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
 
     return sim
 
-
-
-
-def depprec_simulate_opto(model,t,wn_t):
-    assert np.max(wn_t) <= t, print('issue')
+def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None):
+    #randomly initialize from initial condition of training data
     dtRNN = model['dtRNN']
     params = model['params']
-    tauWN = params['tauWN']
-    tauRNN = params['tauRNN']
+    if tauWN is None:
+        tauWN = params['tauWN']
+    if tauRNN is None:
+        tauRNN = params['tauRNN']
     number_units = params['number_units']
-    ampInWN = params['ampInWN']
+    if ampInWN is None:
+        ampInWN = params['ampInWN']
     nonLinearity = params['nonLinearity']
     J = model['J']
     Adata = model['Adata']
-    region1 = model['regions']['region1']
-    region2 = model['regions']['region2']
-
-    dt_wnt = wn_t / dtRNN
-    dt_wnt = dt_wnt.astype(int)
-
-    wn_t_logical = bounds2Logical(dt_wnt, duration=int((t/dtRNN)+1))
 
     tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
     iWN = ampWN * npr.randn(number_units, len(tRNN))
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
-        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+        if tauWN == 0:
+            inputWN[:, tt] = iWN[:, tt] 
+        else:
+            inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
     inputWN = ampInWN * inputWN
     
     #output simulation
@@ -582,15 +589,10 @@ def depprec_simulate_opto(model,t,wn_t):
         # check if the current index is a reset point. Typically this won't
         # be used, but it's an option for concatenating multi-trial data
         # computoe next RNN step
-            
         if H.ndim==1:
             sim[:,tt] = nonLinearity(H)
         else:
             sim[:, tt, np.newaxis] = nonLinearity(H)
-        if wn_t_logical[tt]:
-            H[region2]=-5
-            sim[:,tt] = nonLinearity(H)
-            
         
         #sim[:, tt, np.newaxis] = nonLinearity(H)
         JR = (J.dot(sim[:, tt]).reshape((number_units, 1)) +
@@ -599,6 +601,8 @@ def depprec_simulate_opto(model,t,wn_t):
         H = H + dtRNN*(-H + JR)/tauRNN
 
     return sim
+
+
 
 
 
@@ -622,9 +626,10 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     iWN = ampWN * npr.randn(number_units, len(tRNN))
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
-        #inputWN[:, tt] = iWN[:, tt] 
-
-        inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+        if tauWN==0:
+            inputWN[:, tt] = iWN[:, tt] 
+        else:
+            inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
     inputWN = ampInWN * inputWN
     
     #output simulation
