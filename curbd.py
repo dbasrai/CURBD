@@ -18,6 +18,11 @@ import numpy.linalg
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
+from scipy.stats import multivariate_normal as mvn
+from scipy.stats import norm
+from scipy.stats import truncnorm
+from scipy.stats import uniform
+
 from tqdm import tqdm
 
 from .utils import *
@@ -471,8 +476,8 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
 
     return out
 
-def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
-        tauWN=None):
+def simulate_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
+        tauWN=None, corrnoise=False):
     assert np.max(wn_t) <= t, print('issue')
     dtRNN = model['dtRNN']
     params = model['params']
@@ -489,6 +494,12 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
     region1 = model['regions']['region1']
     region2 = model['regions']['region2']
 
+    r1 = model['regions']['region1']
+    r2 = model['regions']['region2']
+    num_r1 = len(r1)
+    num_r2 = len(r2)
+
+
     dt_wnt = wn_t / dtRNN
     dt_wnt = dt_wnt.astype(int)
 
@@ -496,10 +507,38 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
 
     tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
-    iWN = ampWN * npr.randn(number_units, len(tRNN))
+    if ampWN <1:
+        ampWN=1
+
+    ampWN=1
+    if corrnoise:
+        meanz = np.zeros(number_units) 
+        covz = np.zeros((number_units, number_units))
+        d = number_units    # number of dimensions
+        k = 5# number of factors
+
+        W = np.random.randn(d,k)
+        S = W@W.T + np.diag(np.random.rand(1,d))
+        S =np.diag(1/np.sqrt(np.diag(S))) @ S @ np.diag(1/np.sqrt(np.diag(S)))
+
+
+
+        #covz[:num_r1, :num_r1] = S
+        covz = S
+        np.fill_diagonal(covz, 1)
+        ampWN=1
+
+        iWN  = ampWN * (mvn.rvs(mean=meanz, cov=covz, size=(len(tRNN))).T)
+    else:
+        iWN = npr.randn(number_units, len(tRNN))
+
+    inputWN = np.ones((number_units, len(tRNN)))
     wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
-    for i in wn_idx:
-        iWN[region2, i] = ampWN * optoamp * (npr.randn(len(region2)) - 2)
+            
+    for idx, i in enumerate(wn_idx):
+
+       iWN[region2, i] = truncnorm.rvs(a=-.5, b=.5, loc=-.5, scale=.5,
+               size=len(region2))
     inputWN = np.ones((number_units, len(tRNN)))
 
 
@@ -509,6 +548,9 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
         else:
             inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
 
+    #most_neg = np.min(inputWN)
+    #for idx, i in enumerate(wn_idx):
+    #   inputWN[region2, i] = most_neg*3
     inputWN = ampInWN * inputWN
 ##    for idx, tt in enumerate(wn_idx):
 #        for rdx, i in enumerate(region2):
@@ -549,7 +591,8 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, optoamp=.001, ampInWN=None,
 
     return sim
 
-def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None):
+def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None,
+        max_corr=1):
     #randomly initialize from initial condition of training data
     dtRNN = model['dtRNN']
     params = model['params']
@@ -563,10 +606,34 @@ def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     nonLinearity = params['nonLinearity']
     J = model['J']
     Adata = model['Adata']
+    r1 = model['regions']['region1']
+    r2 = model['regions']['region2']
+    num_r1 = len(r1)
+    num_r2 = len(r2)
 
     tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
-    iWN = ampWN * npr.randn(number_units, len(tRNN))
+    if ampWN < 1:
+        ampWN =1
+
+    meanz = np.zeros(number_units) 
+    covz = np.zeros((number_units, number_units))
+    #d = num_r1    # number of dimensions
+    d = number_units    # number of dimensions
+    k = 5# number of factors
+
+    W = np.random.randn(d,k)
+    S = W@W.T + np.diag(np.random.rand(1,d))
+    S =np.diag(1/np.sqrt(np.diag(S))) @ S @ np.diag(1/np.sqrt(np.diag(S)))
+
+
+
+    #covz[:num_r1, :num_r1] = S
+    covz=S
+    np.fill_diagonal(covz, 1)
+    ampWN=1
+
+    iWN  = ampWN * (mvn.rvs(mean=meanz, cov=covz, size=(len(tRNN))).T)
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
         if tauWN == 0:
@@ -584,6 +651,9 @@ def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None):
         sim[:,0] = nonLinearity(H)
     else:
         sim[:, 0, np.newaxis] = nonLinearity(H)
+    
+    wn_contrib=[]
+    j_contrib=[]
 
     for tt in tqdm(range(1, len(tRNN))):
         # check if the current index is a reset point. Typically this won't
@@ -595,6 +665,8 @@ def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None):
             sim[:, tt, np.newaxis] = nonLinearity(H)
         
         #sim[:, tt, np.newaxis] = nonLinearity(H)
+        #wn_contrib.append(np.sum(np.abs(inputWN[:,tt])))
+        #j_contrib.append(np.sum(np.abs(J.dot(sim[:, tt]))))
         JR = (J.dot(sim[:, tt]).reshape((number_units, 1)) +
               inputWN[:, tt, np.newaxis])
         JR = np.squeeze(JR)
@@ -623,6 +695,9 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
 
     tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
+    if ampWN < 1:
+        ampWN =1
+    ampWN = 1
     iWN = ampWN * npr.randn(number_units, len(tRNN))
     inputWN = np.ones((number_units, len(tRNN)))
     for tt in range(1, len(tRNN)):
