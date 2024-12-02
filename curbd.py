@@ -256,8 +256,8 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         nonLinearity_inv=np.arctanh,
                         resetPoints=None,
                         plotStatus=True, verbose=True,
-                        regions=None):
-    r"""
+                        regions=None, g_across=None):
+    """
     Trains a data-constrained multi-region RNN. The RNN can be used for,
     among other things, Current-Based Decomposition (CURBD).
 
@@ -304,9 +304,14 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     else:
         num_reg1 = len(regions['region1'])
         num_reg2 = len(regions['region2'])
+    if g_across is None:
+        g_across = g
 
     number_units = activity.shape[0]
     number_learn = activity.shape[0]
+
+    region1 = regions['region1']
+    region2 = regions['region2']
 
     dtRNN = dtData / float(dtFactor)
     nRunTot = nRunTrain + nRunFree
@@ -327,7 +332,15 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     inputWN = ampInWN * inputWN
 
     # initialize directed interaction matrix J
-    J = g * npr.randn(number_units, number_units) / math.sqrt(number_units)
+    #J = g * npr.randn(number_units, number_units) / math.sqrt(number_units)
+    J = g * npr.randn(number_units, number_units)
+        
+    J[:num_reg1, num_reg1:] = (g_across / g) *truncnorm.rvs(a=0, b=np.inf, 
+            loc=0,scale=1,size=(num_reg1, num_reg2))
+
+    J[num_reg1:, :num_reg1] = (g_across/g)*truncnorm.rvs(a=0, b=np.inf, 
+            loc=0,scale=1,size=(num_reg2, num_reg1))
+    J = J / math.sqrt(number_units)
     J0 = J.copy()
 
     # set up target training data
@@ -380,6 +393,7 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
             if tt in resetPoints:
                 timepoint = math.floor(tt / dtFactor)
                 H = Adata[:, timepoint]
+
                 if H.ndim==1:
                     H = H[:,None]
             # compute next RNN step
@@ -407,12 +421,16 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                     mask = J[num_reg1:, :num_reg1] < 0
                     J[num_reg1:, :num_reg1][mask] =0
 
+
         rModelSample = RNN[iTarget, :][:, iModelSample]
         distance = np.linalg.norm(Adata[iTarget, :] - rModelSample)
         pVar = 1 - (distance / (math.sqrt(len(iTarget) * len(tData))
                     * stdData)) ** 2
         pVars.append(pVar)
         chi2s.append(chi2)
+        #masky = J[:num_reg1, num_reg1:] < 0.01
+        #print(np.count_nonzero(masky))
+ 
         if verbose:
             print('trial=%d pVar=%f chi2=%f' % (nRun, pVar, chi2))
         if fig:
@@ -477,7 +495,8 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     return out
 
 def simulate_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
-        tauWN=None, corrnoise=False):
+        tauWN=None, corrnoise=False, optoAmp=None, sparse=None,
+        inhib_only=False):
     assert np.max(wn_t) <= t, print('issue')
     dtRNN = model['dtRNN']
     params = model['params']
@@ -498,14 +517,20 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
     r2 = model['regions']['region2']
     num_r1 = len(r1)
     num_r2 = len(r2)
+    if optoAmp is None:
+        optoAmp = ampInWN
+        
 
+    stab_t = .1*t
+    dtStab = int(stab_t / dtRNN)
+    wn_t = wn_t + stab_t
 
     dt_wnt = wn_t / dtRNN
     dt_wnt = dt_wnt.astype(int)
 
-    wn_t_logical = bounds2Logical(dt_wnt, duration=int((t/dtRNN)+1))
+    tRNN = np.arange(0, t+stab_t, dtRNN)
+    wn_t_logical = bounds2Logical(dt_wnt, duration=int(tRNN[-1]/dtRNN)+1)
 
-    tRNN = np.arange(0, t+dtRNN, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
     if ampWN <1:
         ampWN=1
@@ -534,36 +559,43 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
 
     inputWN = np.ones((number_units, len(tRNN)))
     wn_idx = np.arange(len(tRNN))[wn_t_logical.astype(bool)]#horrific
-            
-    for idx, i in enumerate(wn_idx):
-
-       iWN[region2, i] = truncnorm.rvs(a=-.5, b=.5, loc=-.5, scale=.5,
-               size=len(region2))
-    inputWN = np.ones((number_units, len(tRNN)))
-
-
+    
     for tt in range(1, len(tRNN)):
         if tauWN==0:
             inputWN[:,tt] = iWN[:,tt]
         else:
             inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt])*np.exp(- (dtRNN / tauWN))
+    
+    if inhib_only:
+        r2r1 = model['J'][:num_r1, num_r1:]
+        inhibs = np.sum(r2r1, axis=0) < 5
+        rest = numpy.full(num_r1, False)
+        inhibs = np.concatenate((rest, inhibs))
+        num_inhibs=np.count_nonzero(inhibs)
+        print(f'num_inhibs:{num_inhibs}')
 
-    #most_neg = np.min(inputWN)
-    #for idx, i in enumerate(wn_idx):
-    #   inputWN[region2, i] = most_neg*3
+    optoInp =  np.zeros((number_units, len(tRNN))) 
+    for idx, i in enumerate(wn_idx):
+        if inhib_only:
+            optoInp[inhibs, i] = truncnorm.rvs(a=-np.inf, b=0, loc=0,
+                   scale=1,size=num_inhibs) 
+        elif sparse is None:
+            optoInp[region2, i] = truncnorm.rvs(a=-np.inf, b=0, loc=0,
+                   scale=1,size=num_r2) 
+        else:
+            sparse_r2 = np.random.choice(region2, size=int(sparse *
+                len(region2)), replace=False)
+            optoInp[sparse_r2, i] = truncnorm.rvs(a=-np.inf, b=0, loc=0,
+                   scale=1,size=len(sparse_r2)) 
+
+
+
     inputWN = ampInWN * inputWN
-##    for idx, tt in enumerate(wn_idx):
-#        for rdx, i in enumerate(region2):
-#            inputWN[i,tt] = iOpto[rdx, idx]
-#            inputWN[i,tt] = inputWN[i,tt]
-
-
-    #for i in region2:
-    #    for j in wn_idx:
-    #        curr = inputWN[i,j]
-    #        inputWN[i,j]=curr - optoamp
+    optoInp = optoAmp * optoInp
 
     #output simulation
+
+    stabilize = int(.1 * len(tRNN))
     sim = np.zeros((number_units, len(tRNN))) 
 
     #randomly initialize based on data
@@ -572,6 +604,7 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
         sim[:,0] = nonLinearity(H)
     else:
         sim[:, 0, np.newaxis] = nonLinearity(H)
+
 
     for tt in tqdm(range(1, len(tRNN))):
         # check if the current index is a reset point. Typically this won't
@@ -585,11 +618,11 @@ def simulate_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
         
         #sim[:, tt, np.newaxis] = nonLinearity(H)
         JR = (J.dot(sim[:, tt]).reshape((number_units, 1)) +
-              inputWN[:, tt, np.newaxis])
+                inputWN[:, tt, np.newaxis]) + optoInp[:, tt, np.newaxis]
         JR = np.squeeze(JR)
         H = H + dtRNN*(-H + JR)/tauRNN
 
-    return sim
+    return sim[:,dtStab:]
 
 def simulate_corrnoise(model, t, tauRNN=None, ampInWN=None, tauWN=None,
         max_corr=1):
@@ -693,7 +726,10 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     J = model['J']
     Adata = model['Adata']
 
-    tRNN = np.arange(0, t+dtRNN, dtRNN)
+    stab_t = .1*t
+    dtStab = int(stab_t / dtRNN)
+
+    tRNN = np.arange(0, t+stab_t, dtRNN)
     ampWN = math.sqrt(tauWN/dtRNN)
     if ampWN < 1:
         ampWN =1
@@ -708,6 +744,7 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     inputWN = ampInWN * inputWN
     
     #output simulation
+
     sim = np.zeros((number_units, len(tRNN))) 
 
     #randomly initialize based on data
@@ -732,12 +769,12 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
         JR = np.squeeze(JR)
         H = H + dtRNN*(-H + JR)/tauRNN
 
-    return sim
+    return sim[:,dtStab:]
 
 
 def plotFit(model):
     pVars = model['pVars']
-    RN = model['RNN']
+    RNN = model['RNN']
     tRNN = model['tRNN']
     dtFactor = model['params']['dtFactor']
     Adata=model['Adata']

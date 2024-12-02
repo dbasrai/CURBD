@@ -21,23 +21,27 @@ import math
 
 from src.CURBD import curbd
 
-session_path = '../../../data/co/co9/co9_12122023'
+session_path = '../../../data/co/co10/co10_01242024'
 session = MPOptoClass(session_path)
 session_name = session_path.split('/')[-1]
 
+
 binsize=5
 sigma=binsize*5
-dtFactor=10
-tauRNN=.03
-ampInWN=.01
-nRunTrain=100
+dtFactor=5
+tauRNN=.05
+ampInWN=.001
+nRunTrain=25
 num_reset=100
+g=1.5
+g_across=1.5
+P0=1
 
 
 bounds = session.climbing_bounds[:30,:]
+#session.threshold_FRs(threshold=.1, bounds=bounds, overwrite=True)
 reg1, reg2 = session.smoother(bounds=bounds,  binsize=binsize, concat=True,
         sigma=sigma, smooth_type='causal')
-#reg1, reg2 = session.binner(bounds=bounds,  binsize=binsize, concat=True)
 
 
 activity = np.hstack((reg1, reg2))
@@ -66,9 +70,14 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         regions=regions,
         nRunTrain=nRunTrain,
         verbose=True,
-        nRunFree=5,
+        nRunFree=1,
         resetPoints=resetPoints,
+        g=g,
+        g_across=g_across,
+        P0=P0,
         plotStatus=False)
+        
 model['scaler'] = scaler
-pdump(model, f'../../../picklejar/curbdTest_{session_name}_{binsize}binsize_{dtFactor}dtFactor_{tauRNN}tauRNN_{ampInWN}ampInWN.pickle')
+pdump(model,
+        f'../../../picklejar/curbd_models/curbdBio{session_name}_gx{g_across}.pickle')
 print('finish!')
