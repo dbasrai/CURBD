@@ -36,30 +36,27 @@ session_path = '../../../data/co/co7/co7_12082023'
 session = MPOptoClass(session_path)
 session_name = session_path.split('/')[-1]
 
-#session.subsampleNeurons(percent_region1=.6, percent_region2=1,
-#        random_state=1)
+
 binsize=5
 sigma=binsize*10
 dtFactor=5
 tauRNN=.05
 ampInWN=.001
-nRunTrain=10
+nRunTrain=200
 num_reset=100
 g=1.5
-g_across=1.85
-g_loc = -.2
-sparse_percent=30
-P0=1.0
+g_across=1.5
+P0=.1
 
+pre=100
+post=75
 
-bounds = session.climbing_bounds[30:,:]
-session.threshold_FRs(threshold=.5, bounds=bounds, overwrite=True)
-reg1, reg2 = session.smoother(bounds=bounds,  binsize=binsize, concat=True,
+laser_bounds, _ = session.adjustLaserBounds(pre, post, only_climb=True)
+reg1, reg2 = session.smoother(bounds=laser_bounds,  binsize=binsize, concat=True,
         sigma=sigma, smooth_type='causal')
 
 
 activity = np.hstack((reg1, reg2))
-#activity = np.hstack((reg2, reg1))
 scaler = StandardScaler()
 z_activity = scaler.fit_transform(activity)
 z_activity = z_activity.T
@@ -68,11 +65,8 @@ regions={}
 regions['region1'] = np.arange(0, session.num_region1)
 regions['region2'] = np.arange(session.num_region1, session.num_region1 +
         session.num_region2)
-#regions['region1'] = np.arange(0, session.num_region2)
-#regions['region2'] = np.arange(session.num_region2, session.num_region1 +
-#        session.num_region2)
 
-seams = getSeamsFromBounds(bounds, binsize=binsize/dtFactor)
+seams = getSeamsFromBounds(laser_bounds, binsize=binsize/dtFactor)
 temp_output=[]
 start = 0
 for idx in np.arange(len(seams)):
@@ -80,7 +74,11 @@ for idx in np.arange(len(seams)):
     temp_output.append(np.arange(start, end, num_reset))
     start=end
 resetPoints = np.concatenate(temp_output)
-model = curbd.trainBioMultiRegionRNN(z_activity, 
+
+total_time = reg1.shape[0]
+temp = np.arange(total_time)
+model = curbd.trainLaserMultiRegionRNN(z_activity,
+        pre, post,
         dtData=binsize/1000,
         dtFactor=dtFactor,
         tauRNN=tauRNN,
@@ -93,12 +91,11 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         g=g,
         g_across=g_across,
         P0=P0,
-        sparse_percent=sparse_percent,
-        g_loc=g_loc,
-        plotStatus=False)
-
+        plotStatus=False,
+        corrnoise=False,
+        optoAmp=ampInWN)
         
 model['scaler'] = scaler
 pdump(model,
-        f'../../../picklejar/curbd_models/curbdBio3.pickle')
+        f'../../../picklejar/curbd_models/laserModel.pickle')
 print('finish!')

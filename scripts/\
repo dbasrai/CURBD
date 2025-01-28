@@ -941,7 +941,7 @@ def simulate_plus_optoinput(model,t,wn_t, tauRNN=None, ampInWN=None,
                    # replace=False)
             localz = region2[indices] 
             optoInp[localz, i] = truncnorm.rvs(a=0, b=np.inf, loc=0,
-                   scale=1,size=len(localz)) 
+                   scale=4,size=len(localz)) 
 
 
 
