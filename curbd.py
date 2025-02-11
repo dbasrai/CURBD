@@ -391,10 +391,10 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     J = g * (npr.randn(number_units, number_units) + g_loc)
         
     J[:num_reg1, num_reg1:] = (g_across / g) *(truncnorm.rvs(a=0, b=np.inf, 
-            loc=0,scale=1,size=(num_reg1, num_reg2))+.4)
+            loc=0,scale=1,size=(num_reg1, num_reg2)))
 
     J[num_reg1:, :num_reg1] = (g_across/g)*(truncnorm.rvs(a=0, b=np.inf, 
-            loc=0,scale=1,size=(num_reg2, num_reg1))+.4)
+            loc=0,scale=1,size=(num_reg2, num_reg1)))
     J = J / math.sqrt(number_units)
     J0 = J.copy()
 

@@ -32,7 +32,7 @@ def handle_ctrl_c(signal, frame):
     sys.exit(0)
 
 
-session_path = '../../../data/co/co7/co7_12082023'
+session_path = '../../../data/co/co9/co9_12122023'
 session = MPOptoClass(session_path)
 session_name = session_path.split('/')[-1]
 
@@ -43,17 +43,17 @@ sigma=binsize*10
 dtFactor=5
 tauRNN=.05
 ampInWN=.001
-nRunTrain=10
+nRunTrain=20
 num_reset=100
 g=1.5
-g_across=1.85
-g_loc = -.2
-sparse_percent=30
+g_across= 1.5
+g_loc = -.3
+sparse_percent=10
 P0=1.0
 
 
-bounds = session.climbing_bounds[30:,:]
-session.threshold_FRs(threshold=.5, bounds=bounds, overwrite=True)
+bounds = session.climbing_bounds[50:,:]
+session.threshold_FRs(threshold=.75, bounds=bounds, overwrite=True)
 reg1, reg2 = session.smoother(bounds=bounds,  binsize=binsize, concat=True,
         sigma=sigma, smooth_type='causal')
 
@@ -100,5 +100,5 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         
 model['scaler'] = scaler
 pdump(model,
-        f'../../../picklejar/curbd_models/curbdBio3.pickle')
+        f'../../../picklejar/curbd_models/curbdBioco9_{sparse_percent}s_{g_across}ga.pickle')
 print('finish!')
