@@ -49,4 +49,80 @@ def weighted_r2(x, xhat, remove_lows=True):
 def getSeamsFromBounds(bounds, binsize=1):
     #binsize is if you want to downsample
     return np.cumsum(np.diff(bounds, axis=1)//binsize)
+
+def get_lows(arr, percentile=90):
+    """
+    Gets the indices of the elements in a 2D NumPy array
+    that belong to the bottom `percentile` of the values.
+
+    Args:
+    arr: The 2D NumPy array.
+    percentile: The percentile of values to consider.
+
+    Returns:
+    A tuple of arrays containing the row and column indices
+    of the elements in the bottom `percentile`.
+    """
+
+    threshold = np.percentile(arr, percentile)  # Calculate the percentile threshold
+
+    # Get the indices of the elements that satisfy the mask
+    low_indices = np.where(arr < threshold)
+    high_indices = np.where(arr < threshold)
+
+    return low_indices, high_indices
+
+def get_lows(arr, percentile=90):
+    """
+    Gets the indices of the elements in a 2D NumPy array
+    that belong to the bottom `percentile` of the values.
+
+    Args:
+    arr: The 2D NumPy array.
+    percentile: The percentile of values to consider.
+
+    Returns:
+    A tuple of arrays containing the row and column indices
+    of the elements in the bottom `percentile`.
+    """
+
+    threshold = np.percentile(arr, percentile)  # Calculate the percentile threshold
+
+    # Get the indices of the elements that satisfy the mask
+    indices = np.where(arr < threshold)
+
+    return indices
+
+
+
+
+def get_lows_2d(arr, percentile=90):
+    """
+    Gets the indices of the elements in a 2D NumPy array
+    that belong to the bottom `percentile` of the values.
+
+    Args:
+    arr: The 2D NumPy array.
+    percentile: The percentile of values to consider.
+
+    Returns:
+    A tuple of arrays containing the row and column indices
+    of the elements in the bottom `percentile`.
+    """
+
+    flat_arr = arr.flatten()  # Flatten the array for easier sorting
+    threshold = np.percentile(flat_arr, percentile)  # Calculate the percentile threshold
+
+    # Create a boolean mask for values below the threshold
+    mask = flat_arr <= threshold
+
+    # Get the indices of the elements that satisfy the mask
+    indices = np.where(mask)
+
+    # Convert flat indices to 2D indices
+    row_indices, col_indices = np.unravel_index(indices, arr.shape)
+
+    return row_indices, col_indices
+
+
  
