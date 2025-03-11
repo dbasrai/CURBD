@@ -1,5 +1,4 @@
-"""
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+""" %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %
 % Performs Current-Based Decomposition (CURBD) of multi-region data. Ref:
 %
@@ -15,8 +14,9 @@ import numpy as np
 import numpy.random as npr
 import numpy.linalg
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
 from matplotlib.gridspec import GridSpec
+
 
 from scipy.stats import multivariate_normal as mvn
 from scipy.stats import norm
@@ -1794,6 +1794,41 @@ def threeRegionSim(number_units=100,
         fig.show()
     return out
 
+def scaleJ(model):
+    scaler = model['scaler']
+    train_max = model['train_max']
+    scale = scaler.scale_
+
+    J = model['J']
+    J = J / scale[np.newaxis, :]
+    J = J * scale[:, np.newaxis]
+
+    return J
+
+
+
+
+
+
+def computeSumCurrentOut(model, activity):
+    # N observations, K region2, O outputs
+    idx_reg1 = model['regions']['region1']
+    idx_reg2 = model['regions']['region2']
+
+    scaler = model['scaler']
+    train_max = model['train_max']
+
+    J_target = model['J'][idx_reg1,][:, idx_reg2] # O x K
+
+    activity_scaled = scaler.inverse_transform(activity.T * train_max)
+
+    activity_reg2 = activity_scaled[:, idx_reg2] #N x K
+    activity_reg2_avg = np.average(activity_reg2, axis=0) #1xK
+
+
+    contribs = J_target * activity_reg2_avg #O x K
+    return np.sum(np.abs(contribs), axis=0)
+
 
 def computeCURBD(sim):
     """
@@ -1890,7 +1925,46 @@ def rates2spikes(model, rates, scale=True, poisson_mult=1):
 
     return reg1_train, reg2_train, duration
 
+def new_rates2spikes(model, rates, mult=1):
+    assert rates.shape[0]>rates.shape[1], 'samples x neurons!'
+    #rates should be samples x neurons
+    rates_positive = rates + np.abs(np.min(rates, axis=0))
+    scaled = poisson.rvs(size=rates_positive.shape, mu=rates_positive*mult)
+    num_r1 = len(model['regions']['region1'])
+    num_r2 = len(model['regions']['region2'])
+    num_samples = scaled.shape[0]
+    reg1 = scaled[:, :num_r1]
+    reg2 = scaled[:, num_r1:]
+    temp = np.arange(num_samples)
+    reg1_train=[]
+    reg2_train=[]
+    for idx in np.arange(num_r1):
+        reg1_train.append(temp[reg1[:, idx]>0])
+    for idx in np.arange(num_r2):
+        reg2_train.append(temp[reg2[:,idx]>0])
+
+    duration = num_samples
+
+    return reg1_train, reg2_train, duration
 
 
+def region_currs(model, rates):
+    tau = model['params']['tauRNN']
+    idx_reg1 = model['regions']['region1']
+    idx_reg2 = model['regions']['region2']
+    J = scaleJ(model)
+    RNN_reg1 = rates[idx_reg1,:]
+    RNN_reg2 = rates[idx_reg2,:]
+
+    J_dstream = J[idx_reg1,:]
+    dstream = J_dstream[:, idx_reg1]
+    upstream = J_dstream[:, idx_reg2]
+    
+    dstream_inp = dstream@RNN_reg1 / tau
+    upstream_inp = upstream@RNN_reg2 / tau
+
+    dstream_decay = ((tau-1)/tau)*RNN_reg1
+
+    return dstream_inp.T, upstream_inp.T, dstream_decay.T
 
 
