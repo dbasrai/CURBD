@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score
+import matplotlib.pyplot as plt
 import copy
 import pdb
 
@@ -124,5 +125,51 @@ def get_lows_2d(arr, percentile=90):
 
     return row_indices, col_indices
 
+def trial_sem(neural, fs=1, pre_baseline=None, sem = 'neurons'):
+    
+    #trials x time x neurons
+    if sem == 'neurons':
+        num_sem = neural.shape[2]
+        temp = np.average(neural, axis=0)
+        neural_avgsem = np.std(temp, axis=1) / np.sqrt(num_sem) / (fs/1000)
+    else:
+        num_sem = neural.shape[0]
+        temp = np.average(neural, axis=2)
+        neural_avgsem = np.std(temp, axis=0) / np.sqrt(num_sem) / (fs/1000)
+    neural_avgavg = np.average(neural, axis=(0,2)) / (fs/1000)
+    #temp = np.average(neural, axis=2)
 
- 
+    if pre_baseline is not None:
+        neural_bs = np.average(neural[:,:pre_baseline,:]) / (fs/1000)
+        neural_avgavg = neural_avgavg-neural_bs
+
+
+    return neural_avgavg, neural_avgsem
+
+
+def plot_trial_sem(avg, sem, pre=50, colors=None, labels='None', ax=None,
+        figsize=None):
+    if ax==None:
+        fig, ax = plt.subplots(figsize=figsize)
+    for idx in range(len(avg)):
+        y = avg[idx]
+        yhat = sem[idx]
+        x = np.arange(len(y)) - pre
+        if labels is not None:
+            label = labels[idx]
+        else:
+            label=None
+        if colors is not None:
+            color = colors[idx]
+        else:
+            color=None
+        ax.plot(x, y, color=color, label=label)
+        ax.fill_between(x, y - yhat, y+yhat, color=color, alpha=0.2)
+    ax.axvline(0, linestyle='--', color='tab:blue')
+    if labels is not 'None':
+        ax.legend()
+    fig.tight_layout()
+
+    return fig, ax
+
+
