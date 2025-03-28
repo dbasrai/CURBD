@@ -25,7 +25,7 @@ def logical2Bounds(logical):
     end_idx = np.where(end)[0]
 
     
-    return (np.vstack((start_idx, end_idx)).T + 1)
+    return (np.vstack((start_idx, end_idx)).T)
 
 def vaf(x,xhat, round_values=True):
     """

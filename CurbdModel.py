@@ -1,4 +1,12 @@
-from .utils import *
+from src.utils.evaluate import *
+from src.utils.filters import *
+from src.utils.gen_utils import *
+from src.utils.torch_utils import *
+from src.neural import *
+from src.regression import *
+from src.experiment import *
+from src.analysis import *
+from src.plotter import *
 from scipy.stats import multivariate_normal as mvn
 from scipy.stats import norm
 from scipy.stats import truncnorm
@@ -9,10 +17,22 @@ from .curbd import *
 
 class CurbdModel:
 
-    def __init__(self, model):
-        for key, value in model.items():
+    def __init__(self, input_dict):
+        for key, value in input_dict.items():
             setattr(self, key, value)
+        if 'true' in input_dict:
+            model = input_dict['model']
+            self.sim=True
+            self.climbing_bounds = np.array([[0, self.duration]])
+            self.laser_bounds = self.opto_bounds #unecessary maybe
+            self.only_climbing_bounds = logical2Bounds(1 - self.opto_logical)
+            print('contains sim data already')
+        else:
+            model = input_dict
+            self.sim=False
         self.model = model
+        self.idx_region1 = model['regions']['region1']
+        self.idx_region2 = model['regions']['region2']
 
     def simulate_opto(self, t, stim_frequency, ampInWN=None, optoMult=1, plot=True):
         params = self.params
@@ -58,12 +78,12 @@ class CurbdModel:
         optoInp =  np.zeros((number_units, len(tRNN))) 
         for idx, i in enumerate(wn_idx):
             indices = self.local_r2[0]
-            #sparse_indices = np.random.choice(indices, size=len(indices)//4,
-                   # replace=False)
-            localz = region2[indices] 
+            sparse_indices = np.random.choice(indices,
+                    size=int(len(indices)//1.5),replace=False)
+            localz = region2[sparse_indices] 
             optoInp[localz, i] = truncnorm.rvs(a=0, b=np.inf, loc=0,
-                   scale=1,size=len(localz)) 
-
+                    scale=1,size=len(localz)) 
+        #randPower = np.random.rand(optoInp.shape[0], optoInp.shape[1]) * optoMult
         inputWN = ampInWN * inputWN
         optoInp = optoMult * optoInp
 
@@ -98,11 +118,12 @@ class CurbdModel:
 
         sim = sim[:,dtStab:]
         wn_t_logical = wn_t_logical[dtStab:]
+        all_inputs = inputWN[:, dtStab:] + optoInp[:, dtStab:]
         
         if plot:
             self.plot_opto_avg(sim, wn_t_logical)
-        
-        return sim, wn_t_logical
+                
+        return sim, wn_t_logical, all_inputs
 
     def rates2spikes(self, rates, scale=True, poisson_mult=5):
         rates = rates.T #assuming passing in neurons x apmles
@@ -114,6 +135,11 @@ class CurbdModel:
             scaled = scaler.inverse_transform(rates * train_max) * poisson_mult
             scaled[scaled<0]=0 #only positive
             scaled = poisson.rvs(size=scaled.shape, mu=scaled)
+        else:
+            rates_positive = rates + np.abs(np.min(rates, axis=0))
+            train_max = self.train_max
+            scaled = poisson.rvs(size=rates_positive.shape,
+                    mu=rates_positive*train_max*poisson_mult)
         num_r1 = len(self.regions['region1'])
         num_r2 = len(self.regions['region2'])
         num_samples = scaled.shape[0]
@@ -133,7 +159,7 @@ class CurbdModel:
 
         return reg1_train, reg2_train, duration
 
-    def generate_ratedata(self, rates, opto_logical):
+    def generate_ratedata(self, rates, opto_logical, all_input):
         output={}
         output['model'] = self.model
 
@@ -145,6 +171,7 @@ class CurbdModel:
 
         output['region1'] = rates_region1.T
         output['region2'] = rates_region2.T
+        output['input'] = all_input.T
         output['true'] = rates.T
         output['opto_bounds'] = logical2Bounds(opto_logical)
         output['opto_logical'] = opto_logical
@@ -167,56 +194,36 @@ class CurbdModel:
 
         return output
 
-    def calculate_influence(self, rates):
-        tau = self.params['tauRNN']
-        idx_reg1 = self.regions['region1']
-        idx_reg2 = self.regions['region2']
-        J = self.J
-        RNN_reg1 = rates[idx_reg1,:]
-        RNN_reg2 = rates[idx_reg2,:]
+    def get_region_predics(self, activity=None, bounds=None, binsize=1,
+            nlags=None):
+        if activity is None:
+            activity = self.true
+            if bounds is not None:
+                activity = self.activityInBounds(bounds, binsize, nlags)
+        else:
+            assert bounds is None, 'bounds not being used'
+               
+        tau = self.model['params']['tauRNN']
+        if binsize is None:
+            dtRNN = self.model['dtRNN']
+        else:
+            dtRNN = binsize/1000
+        J = copy.deepcopy(self.model['J'])
+        #np.fill_diagonal(J, 0)
+        reg1 = activity[:, self.idx_region1]
+        reg2 = activity[:, self.idx_region2]
 
-        J_dstream = J[idx_reg1,:]
-        dstream = J_dstream[:, idx_reg1]
-        upstream = J_dstream[:, idx_reg2]
+        J_dstream = J[self.idx_region1,:]
+        dstream = J_dstream[:, self.idx_region1]
+        upstream = J_dstream[:, self.idx_region2]
         
-        dstream_inp =(dstream@RNN_reg1 / tau).T
-        upstream_inp = (upstream@RNN_reg2 / tau).T
+        dstream_inp = (dstream@reg1.T) * dtRNN / tau
+        upstream_inp = (upstream@reg2.T) * dtRNN / tau
 
-        dstream_decay = (((tau-1)/tau)*RNN_reg1).T
+        dstream_decay = ((tau-dtRNN)/tau)*reg1
 
-        dstream = np.average(np.abs(dstream_inp), axis=0) + np.average(np.abs(dstream_decay), axis=0)
-        upstream = np.average(np.abs(upstream_inp), axis=0)
-
-        return np.log10(dstream/upstream)
+        return dstream_inp.T, upstream_inp.T, dstream_decay
     
-    def region_influence(self, output):
-        rates = output['true'].T
-        tau = self.params['tauRNN']
-        idx_reg1 = self.regions['region1']
-        idx_reg2 = self.regions['region2']
-        J = self.J
-        RNN_reg1 = rates[idx_reg1,:]
-        RNN_reg2 = rates[idx_reg2,:]
-
-        J_dstream = J[idx_reg1,:]
-        dstream = J_dstream[:, idx_reg1]
-        upstream = J_dstream[:, idx_reg2]
-        
-        dstream_inp =(dstream@RNN_reg1 / tau).T
-        upstream_inp = (upstream@RNN_reg2 / tau).T
-
-        dstream_decay = (((tau-1)/tau)*RNN_reg1).T
-
-        dstream = np.average(np.abs(dstream_inp), axis=0) + np.average(np.abs(dstream_decay), axis=0)
-        upstream = np.average(np.abs(upstream_inp), axis=0)
-
-        return np.log10(dstream/upstream)
-
-
-
-
-
-
     def plot_opto_avg(self, sim, wn_t_logical):
         opto_times = logical2Bounds(wn_t_logical)
         r1_idx = self.regions['region1']
@@ -269,7 +276,7 @@ class CurbdModel:
         J = self.J
         J_dstream = J[self.idx_region1,:]
 
-        dstream = J_dstream[:, eelf.idx_region1]
+        dstream = J_dstream[:, self.idx_region1]
         upstream = J_dstream[:, self.idx_region2]
 
         dstream = np.sum(np.abs(dstream))
@@ -277,27 +284,53 @@ class CurbdModel:
 
         return dstream, upstream
 
-    def relative_J(self, activity=None, tau=None):
+    def activityInBounds(self, bounds, binsize=1, nlags=None):
+        activity = self.true
+        output = bin_neural_bounds(activity, binsize, bounds)
+        if nlags is not None:
+            _, output = format_and_stitch_ar(output, nlags=nlags)
+        else:
+            output = np.concatenate(output)
+        #logical = bounds2Logical(bounds, duration=self.duration).astype(bool)
+        #activity = self.true[logical,:]
+        return output
+
+    def relative_J(self, activity=None, bounds=None, binsize=1, nlags=None):
         if activity is None:
-            activity = self.model['RNN']
-        if tau is None:
-            tau = self.model['params']['tauRNN']
-        J = self.J
-        RNN_reg1 = activity[self.idx_region1,:]
-        RNN_reg2 = activity[self.idx_region2,:]
+            activity = self.true
+            if bounds is not None:
+                activity = self.activityInBounds(bounds, binsize, nlags)
+
+        tau = self.model['params']['tauRNN']
+        dtRNN = binsize/1000
+        J = self.model['J']
+        reg1 = activity[:, self.idx_region1]
+        reg2 = activity[:, self.idx_region2]
 
         J_dstream = J[self.idx_region1,:]
         dstream = J_dstream[:, self.idx_region1]
         upstream = J_dstream[:, self.idx_region2]
         
-        dstream_inp = dstream@RNN_reg1 / tau
-        upstream_inp = upstream@RNN_reg2 / tau
+        dstream_inp = (dstream@reg1.T) * dtRNN / tau
+        upstream_inp = (upstream@reg2.T) * dtRNN / tau
 
-        dstream_decay = ((tau-1)/tau)*RNN_reg1
-        sum_dstream_decay = np.sum(np.abs(dstream_decay), axis=1)
+        dstream_decay = ((tau-dtRNN)/tau)*reg1
+        sum_dstream_decay = np.sum(np.abs(dstream_decay), axis=0)
 
-        dstream_drive = np.sum(np.abs(dstream_inp), axis=1) + sum_dstream_decay
+        dstream_drive = np.sum(np.abs(dstream_inp), axis=1) 
         upstream_drive = np.sum(np.abs(upstream_inp), axis=1)
-        return np.sum(dstream_drive), np.sum(upstream_drive)
+        return np.sum(dstream_drive), np.sum(upstream_drive), sum_dstream_decay
+
+    def adjustLaserBounds(self, pre, post):
+        laser_bounds = copy.deepcopy(self.laser_bounds)
+        only_climb_bounds = copy.deepcopy(self.only_climbing_bounds)
+
+        laser_bounds[:,0]=laser_bounds[:,0] - pre
+        laser_bounds[:,1]=laser_bounds[:,1] +post
+
+        only_climb_bounds[1:,0] = only_climb_bounds[1:,0] + post
+        only_climb_bounds[:-1,1] = only_climb_bounds[:-1,1] - pre
+        return laser_bounds, only_climb_bounds
+
 
 

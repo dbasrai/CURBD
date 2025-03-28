@@ -26,7 +26,7 @@ from scipy.stats import poisson
 
 from tqdm import tqdm
 
-from .utils import *
+#from .utils import *
 
 def trainMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         tauWN=0.1, ampInWN=0.01, nRunTrain=2000,
