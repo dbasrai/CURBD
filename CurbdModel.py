@@ -78,9 +78,10 @@ class CurbdModel:
         optoInp =  np.zeros((number_units, len(tRNN))) 
         for idx, i in enumerate(wn_idx):
             indices = self.local_r2[0]
-            sparse_indices = np.random.choice(indices,
-                    size=int(len(indices)//1.5),replace=False)
-            localz = region2[sparse_indices] 
+            #sparse_indices = np.random.choice(indices,
+                    #size=int(len(indices)//1.5),replace=False)
+            localz = region2[indices]
+            #localz = region2[sparse_indices] 
             optoInp[localz, i] = truncnorm.rvs(a=0, b=np.inf, loc=0,
                     scale=1,size=len(localz)) 
         #randPower = np.random.rand(optoInp.shape[0], optoInp.shape[1]) * optoMult
@@ -135,16 +136,21 @@ class CurbdModel:
             scaled = scaler.inverse_transform(rates * train_max) * poisson_mult
             scaled[scaled<0]=0 #only positive
             scaled = poisson.rvs(size=scaled.shape, mu=scaled)
+
+            return scaled
         else:
-            rates_positive = rates + np.abs(np.min(rates, axis=0))
+            #rates = rates * train_max
             train_max = self.train_max
+            rates_positive = rates + np.abs(np.min(rates, axis=0))
             scaled = poisson.rvs(size=rates_positive.shape,
-                    mu=rates_positive*train_max*poisson_mult)
+                    mu=rates_positive*poisson_mult)
         num_r1 = len(self.regions['region1'])
         num_r2 = len(self.regions['region2'])
         num_samples = scaled.shape[0]
         reg1 = scaled[:, :num_r1]
         reg2 = scaled[:, num_r1:]
+
+        return scaled
 
 
         temp = np.arange(num_samples)
@@ -159,7 +165,7 @@ class CurbdModel:
 
         return reg1_train, reg2_train, duration
 
-    def generate_ratedata(self, rates, opto_logical, all_input):
+    def generate_ratedata(self, rates, opto_logical):
         output={}
         output['model'] = self.model
 
@@ -171,7 +177,7 @@ class CurbdModel:
 
         output['region1'] = rates_region1.T
         output['region2'] = rates_region2.T
-        output['input'] = all_input.T
+        #output['input'] = all_input.T
         output['true'] = rates.T
         output['opto_bounds'] = logical2Bounds(opto_logical)
         output['opto_logical'] = opto_logical
