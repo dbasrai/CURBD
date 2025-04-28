@@ -16,6 +16,7 @@ import numpy.linalg
 
 import matplotlib.pyplot as plt 
 from matplotlib.gridspec import GridSpec
+from src.utils.evaluate import *
 
 
 from scipy.stats import multivariate_normal as mvn
@@ -1966,5 +1967,28 @@ def region_currs(model, rates):
     dstream_decay = ((tau-1)/tau)*RNN_reg1
 
     return dstream_inp.T, upstream_inp.T, dstream_decay.T
+
+def get_lows(arr, percentile=90):
+    """
+    Gets the indices of the elements in a 2D NumPy array
+    that belong to the bottom `percentile` of the values.
+
+    Args:
+    arr: The 2D NumPy array.
+    percentile: The percentile of values to consider.
+
+    Returns:
+    A tuple of arrays containing the row and column indices
+    of the elements in the bottom `percentile`.
+    """
+
+    threshold = np.percentile(arr, percentile)  # Calculate the percentile threshold
+
+    # Get the indices of the elements that satisfy the mask
+    low_indices = np.where(arr < threshold)
+    high_indices = np.where(arr < threshold)
+
+    return low_indices, high_indices
+
 
 

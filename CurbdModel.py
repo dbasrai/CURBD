@@ -25,6 +25,7 @@ class CurbdModel:
             self.sim=True
             self.climbing_bounds = np.array([[0, self.duration]])
             self.laser_bounds = self.opto_bounds #unecessary maybe
+            #self.ctrl_bounds = deepcopy(self.opto_bounds) + 400
             self.only_climbing_bounds = logical2Bounds(1 - self.opto_logical)
             print('contains sim data already')
         else:
@@ -34,7 +35,7 @@ class CurbdModel:
         self.idx_region1 = model['regions']['region1']
         self.idx_region2 = model['regions']['region2']
 
-    def simulate_opto(self, t, stim_frequency, ampInWN=None, optoMult=1, plot=True):
+    def simulate_opto(self, t, stim_frequency, ampInWN=None, tauRNN=None, optoMult=1, plot=True):
         params = self.params
         dtRNN = self.dtRNN
         tauWN = params['tauWN']
@@ -42,7 +43,8 @@ class CurbdModel:
         region1 = self.regions['region1']
         region2 = self.regions['region2']
         nonLinearity = params['nonLinearity']
-        tauRNN = params['tauRNN']
+        if tauRNN is None:
+            tauRNN = params['tauRNN']
         Adata = self.Adata
         J = self.J
 
@@ -325,7 +327,7 @@ class CurbdModel:
 
         dstream_drive = np.sum(np.abs(dstream_inp), axis=1) 
         upstream_drive = np.sum(np.abs(upstream_inp), axis=1)
-        return np.sum(dstream_drive), np.sum(upstream_drive), sum_dstream_decay
+        return np.sum(dstream_drive), np.sum(upstream_drive), np.sum(sum_dstream_decay)
 
     def adjustLaserBounds(self, pre, post):
         laser_bounds = copy.deepcopy(self.laser_bounds)

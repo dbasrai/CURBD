@@ -1,5 +1,7 @@
-from src.MPOptoClass import *
-from src.CURBD.utils import *
+from src.MPOpto import *
+from src.utils.gen_utils import *
+from src.utils.filters import *
+from src.utils.evaluate import *
 import scipy
 import copy
 import time
@@ -33,22 +35,22 @@ def handle_ctrl_c(signal, frame):
 
 
 session_path = '../../../data/co/co9/co9_12122023'
-session = MPOptoClass(session_path)
+session = MPOpto(session_path)
 session_name = session_path.split('/')[-1]
 
 #session.subsampleNeurons(percent_region1=.6, percent_region2=1,
 #        random_state=1)
 binsize=5
-sigma=binsize*10
-dtFactor=5
+sigma=binsize*5
+dtFactor=1
 tauRNN=.05
 ampInWN=.001
-nRunTrain=20
+nRunTrain=10
 num_reset=100
 g=1.5
 g_across= 1.5
-g_loc = -.3
-sparse_percent=10
+g_loc = -.2
+sparse_percent=30
 P0=1.0
 
 
@@ -100,5 +102,5 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         
 model['scaler'] = scaler
 pdump(model,
-        f'../../../picklejar/curbd_models/curbdBioco9_{sparse_percent}s_{g_across}ga.pickle')
+        f'../../../picklejar/curbd_models/curbdBioco9_{sparse_percent}s_{g_across}ga_dt5_2.pickle')
 print('finish!')
