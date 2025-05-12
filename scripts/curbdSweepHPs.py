@@ -34,28 +34,27 @@ def handle_ctrl_c(signal, frame):
     sys.exit(0)
 
 
-session_path = '../../../data/co/co9/co9_12122023'
+session_path = '../../../data/co/co12/co12_02132024'
 session = MPOpto(session_path)
 session_name = session_path.split('/')[-1]
 
-#session.subsampleNeurons(percent_region1=.6, percent_region2=1,
-#        random_state=1)
 binsize=5
-sigma=binsize*5
-dtFactor=1
+sigma=binsize*10
+dtFactor=5
 tauRNN=.05
 ampInWN=.001
 nRunTrain=10
 num_reset=100
-g=1.5
-g_across= 1.5
-g_loc = -.2
-sparse_percent=30
+g=1.75
+g_across= 1.0
+g_loc = (-.3,-.3)
+sparse_percent=85
 P0=1.0
 
 
 bounds = session.climbing_bounds[50:,:]
 session.threshold_FRs(threshold=.75, bounds=bounds, overwrite=True)
+session.subsampleNeurons(percent_region1=1, percent_region2=.6)
 reg1, reg2 = session.smoother(bounds=bounds,  binsize=binsize, concat=True,
         sigma=sigma, smooth_type='causal')
 
@@ -102,5 +101,5 @@ model = curbd.trainBioMultiRegionRNN(z_activity,
         
 model['scaler'] = scaler
 pdump(model,
-        f'../../../picklejar/curbd_models/curbdBioco9_{sparse_percent}s_{g_across}ga_dt5_2.pickle')
+        f'../../../picklejar/curbd_models2/curbdBioco12_{g_across}.pickle')
 print('finish!')

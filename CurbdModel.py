@@ -35,7 +35,8 @@ class CurbdModel:
         self.idx_region1 = model['regions']['region1']
         self.idx_region2 = model['regions']['region2']
 
-    def simulate_opto(self, t, stim_frequency, ampInWN=None, tauRNN=None, optoMult=1, plot=True):
+    def simulate_opto(self, t, stim_frequency, ampInWN=None, tauRNN=None,
+            optoMult=1, plot=True, dur=.025, sparse_stim=False):
         params = self.params
         dtRNN = self.dtRNN
         tauWN = params['tauWN']
@@ -53,7 +54,7 @@ class CurbdModel:
         
         #generating optotimes
         starts = np.linspace(1, t, int((t-1)*stim_frequency), endpoint=False)
-        stops = starts + .025 #stims last 25 ms
+        stops = starts + dur #stims last 25 ms
         opto_times = np.vstack((starts, stops)).T
             
         #we simulate a lil extra to let it stabilize
@@ -80,10 +81,12 @@ class CurbdModel:
         optoInp =  np.zeros((number_units, len(tRNN))) 
         for idx, i in enumerate(wn_idx):
             indices = self.local_r2[0]
-            #sparse_indices = np.random.choice(indices,
-                    #size=int(len(indices)//1.5),replace=False)
-            localz = region2[indices]
-            #localz = region2[sparse_indices] 
+            if sparse_stim is not None:
+                sparse_indices = np.random.choice(indices,
+                        size=int(len(indices)*sparse_stim),replace=False)
+                localz = region2[sparse_indices] 
+            else:
+                localz = region2[indices]
             optoInp[localz, i] = truncnorm.rvs(a=0, b=np.inf, loc=0,
                     scale=1,size=len(localz)) 
         #randPower = np.random.rand(optoInp.shape[0], optoInp.shape[1]) * optoMult
@@ -124,7 +127,7 @@ class CurbdModel:
         all_inputs = inputWN[:, dtStab:] + optoInp[:, dtStab:]
         
         if plot:
-            self.plot_opto_avg(sim, wn_t_logical)
+            self.plot_opto_avg(sim, wn_t_logical, dur=dur)
                 
         return sim, wn_t_logical, all_inputs
 
@@ -138,14 +141,17 @@ class CurbdModel:
             scaled = scaler.inverse_transform(rates * train_max) * poisson_mult
             scaled[scaled<0]=0 #only positive
             scaled = poisson.rvs(size=scaled.shape, mu=scaled)
-
-            return scaled
         else:
             #rates = rates * train_max
+            scaler = self.scaler
+            scale_ = np.average(scaler.scale_)
+            mean_ = np.average(scaler.mean_)
+
             train_max = self.train_max
-            rates_positive = rates + np.abs(np.min(rates, axis=0))
-            scaled = poisson.rvs(size=rates_positive.shape,
-                    mu=rates_positive*poisson_mult)
+            scaled = rates*train_max*scale_ + mean_
+            scaled[scaled<0]=0 # only positive
+            scaled = poisson.rvs(size=scaled.shape,
+                    mu=scaled*poisson_mult)
         num_r1 = len(self.regions['region1'])
         num_r2 = len(self.regions['region2'])
         num_samples = scaled.shape[0]
@@ -154,36 +160,22 @@ class CurbdModel:
 
         return scaled
 
-
-        temp = np.arange(num_samples)
-        reg1_train=[]
-        reg2_train=[]
-        for idx in np.arange(num_r1):
-            reg1_train.append(temp[reg1[:, idx]>0])
-        for idx in np.arange(num_r2):
-            reg2_train.append(temp[reg2[:,idx]>0])
-
-        duration = num_samples
-
-        return reg1_train, reg2_train, duration
-
-    def generate_ratedata(self, rates, opto_logical):
+    def generate_ratedata(self, original_rates, scaled_rates, opto_logical):
         output={}
         output['model'] = self.model
 
         idx_r1 = self.regions['region1']
         idx_r2 = self.regions['region2']
 
-        rates_region1 = rates[idx_r1,:]
-        rates_region2 = rates[idx_r2,:]
+        scaled_rates_region1 = scaled_rates[idx_r1,:]
+        scaled_rates_region2 = scaled_rates[idx_r2,:]
 
-        output['region1'] = rates_region1.T
-        output['region2'] = rates_region2.T
-        #output['input'] = all_input.T
-        output['true'] = rates.T
+        output['region1'] = scaled_rates_region1.T
+        output['region2'] = scaled_rates_region2.T
+        output['true'] = original_rates.T
         output['opto_bounds'] = logical2Bounds(opto_logical)
         output['opto_logical'] = opto_logical
-        output['duration'] = rates.shape[1]
+        output['duration'] = scaled_rates.shape[1]
 
         return output
 
@@ -232,7 +224,9 @@ class CurbdModel:
 
         return dstream_inp.T, upstream_inp.T, dstream_decay
     
-    def plot_opto_avg(self, sim, wn_t_logical):
+    def plot_opto_avg(self, sim, wn_t_logical, dur):
+        if dur<1:
+            dur = int(dur*1000)
         opto_times = logical2Bounds(wn_t_logical)
         r1_idx = self.regions['region1']
         r2_idx = self.regions['region2']
@@ -240,7 +234,7 @@ class CurbdModel:
         r2_trials = []
         sample_r1=[]
         for trial in opto_times:
-            start = int(trial[0])-25
+            start = int(trial[0])-dur
             end = start+225
             
             r1_trials.append(sim.T[start:end,r1_idx])
@@ -249,14 +243,15 @@ class CurbdModel:
         r1_trials = np.array(r1_trials)
         r2_trials = np.array(r2_trials)
 
-        r1_avg, r1_sem = trial_sem(r1_trials, pre_baseline=25)
-        r2_avg, r2_sem = trial_sem(r2_trials, pre_baseline=25)
+        r1_avg, r1_sem = trial_sem(r1_trials, pre_baseline=dur)
+        r2_avg, r2_sem = trial_sem(r2_trials, pre_baseline=dur)
 
-        fig, ax = plot_trial_sem([r1_avg, r2_avg], [r1_sem, r2_sem], labels=['dstream', 'upstream'], pre=25)
-        ax.axvline(25, linestyle='--')
+        fig, ax = plot_trial_sem([r1_avg, r2_avg], [r1_sem, r2_sem],
+                labels=['dstream', 'upstream'], pre=dur)
+        ax.axvline(dur, linestyle='--')
         ax.set_ylabel('avg rate')
         ax.set_xlabel('ms')
-        ax.set_title('25 ms negative input to upstream region')
+        ax.set_title(f'{dur} ms negative input to upstream region')
 
         return fig, ax
 
@@ -281,7 +276,7 @@ class CurbdModel:
 
 
     def analyze_J(self):
-        J = self.J
+        J = self.model['J']
         J_dstream = J[self.idx_region1,:]
 
         dstream = J_dstream[:, self.idx_region1]
@@ -289,7 +284,8 @@ class CurbdModel:
 
         dstream = np.sum(np.abs(dstream))
         upstream = np.sum(np.abs(upstream))
-
+        
+        print(np.log10(dstream/upstream))
         return dstream, upstream
 
     def activityInBounds(self, bounds, binsize=1, nlags=None):
@@ -327,7 +323,11 @@ class CurbdModel:
 
         dstream_drive = np.sum(np.abs(dstream_inp), axis=1) 
         upstream_drive = np.sum(np.abs(upstream_inp), axis=1)
-        return np.sum(dstream_drive), np.sum(upstream_drive), np.sum(sum_dstream_decay)
+        d=np.sum(dstream_drive)
+        u=np.sum(upstream_drive)
+        decay=np.sum(sum_dstream_decay)
+        print(np.log10((d+decay)/u))
+        return d, u, decay
 
     def adjustLaserBounds(self, pre, post):
         laser_bounds = copy.deepcopy(self.laser_bounds)

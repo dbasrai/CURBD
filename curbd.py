@@ -262,7 +262,7 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         plotStatus=True, verbose=True,
                         regions=None, g_across=None, 
                         sparse_percent=80,
-                        g_loc=0):
+                        g_loc=(0,0)):
     """
     Trains a data-constrained multi-region RNN. The RNN can be used for,
     among other things, Current-Based Decomposition (CURBD).
@@ -340,7 +340,9 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
 
     # initialize directed interaction matrix J
     #J = g * npr.randn(number_units, number_units) / math.sqrt(number_units)
-    J = g * (npr.randn(number_units, number_units) + g_loc)
+    J = g * (npr.randn(number_units, number_units))
+    J[:num_reg1, :num_reg1] = J[:num_reg1, :num_reg1] + g_loc[0]
+    J[num_reg1:, num_reg1:] = J[num_reg1:, num_reg1:] + g_loc[1]
         
     J[:num_reg1, num_reg1:] = (g_across / g) *(truncnorm.rvs(a=0, b=np.inf, 
             loc=0,scale=1,size=(num_reg1, num_reg2)))
@@ -442,6 +444,20 @@ def trainBioMultiRegionRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
             low_indices, high_indices = get_lows(temp, percentile=percentile)
             for idx in low_indices:
                 J[num_reg1:, :num_reg1][:, idx] = 0
+
+            #adding sparsity, maybe a bad idea
+
+            #temp = np.sum(np.abs(J[:num_reg1, :num_reg1]), axis=0) #across region
+            #low_indices, high_indices = get_lows(temp, percentile=percentile)
+            #for idx in low_indices:
+            #    J[:num_reg1, :num_reg1][:, idx] = 0
+
+            #temp = np.sum(np.abs(J[num_reg1:, num_reg1:]), axis=0) #across region
+            #low_indices, high_indices = get_lows(temp, percentile=percentile)
+            #for idx in low_indices:
+            #    J[num_reg1:, num_reg1:][:, idx] = 0
+
+
 
 
             
