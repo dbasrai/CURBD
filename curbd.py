@@ -1913,57 +1913,6 @@ def computeCURBD(sim):
                                                               lab_trg)
     return (CURBD, CURBDLabels)
 
-def rates2spikes(model, rates, scale=True, poisson_mult=1):
-    assert rates.shape[0]>rates.shape[1], 'samples x neurons!'
-    #rates should be samples x neurons
-    if scale is not None:
-        scaler = model['scaler']
-        train_max = model['train_max']
-
-        scaled = scaler.inverse_transform(rates * train_max) * poisson_mult
-        scaled[scaled<0]=0 #only positive
-        scaled = poisson.rvs(size=scaled.shape, mu=scaled)
-    num_r1 = len(model['regions']['region1'])
-    num_r2 = len(model['regions']['region2'])
-    num_samples = scaled.shape[0]
-    reg1 = scaled[:, :num_r1]
-    reg2 = scaled[:, num_r1:]
-
-
-    temp = np.arange(num_samples)
-    reg1_train=[]
-    reg2_train=[]
-    for idx in np.arange(num_r1):
-        reg1_train.append(temp[reg1[:, idx]>0])
-    for idx in np.arange(num_r2):
-        reg2_train.append(temp[reg2[:,idx]>0])
-
-    duration = num_samples
-
-    return reg1_train, reg2_train, duration
-
-def new_rates2spikes(model, rates, mult=1):
-    assert rates.shape[0]>rates.shape[1], 'samples x neurons!'
-    #rates should be samples x neurons
-    rates_positive = rates + np.abs(np.min(rates, axis=0))
-    scaled = poisson.rvs(size=rates_positive.shape, mu=rates_positive*mult)
-    num_r1 = len(model['regions']['region1'])
-    num_r2 = len(model['regions']['region2'])
-    num_samples = scaled.shape[0]
-    reg1 = scaled[:, :num_r1]
-    reg2 = scaled[:, num_r1:]
-    temp = np.arange(num_samples)
-    reg1_train=[]
-    reg2_train=[]
-    for idx in np.arange(num_r1):
-        reg1_train.append(temp[reg1[:, idx]>0])
-    for idx in np.arange(num_r2):
-        reg2_train.append(temp[reg2[:,idx]>0])
-
-    duration = num_samples
-
-    return reg1_train, reg2_train, duration
-
 
 def region_currs(model, rates):
     tau = model['params']['tauRNN']
