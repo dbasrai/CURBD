@@ -1,0 +1,12 @@
+name: curbd
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - numpy>=2.0
+  - scipy
+  - matplotlib
+  - scikit-learn
+  - pyyaml
+  - tqdm
+  - pip
