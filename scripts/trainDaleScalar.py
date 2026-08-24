@@ -142,7 +142,6 @@ def save_eval_plots(model, run_dir, n_trials, trial_length, tag=''):
     for r in tf_slim:
         print('    {schedule:16s}  n_reset={n_reset:4d}  pVar={pVar:8.3f}  '
               'corr={corr:6.3f}  sat={sat:.1%}'.format(**r))
-    by_name = {r['schedule']: r for r in tf_rows}
     curbd.plot_population_predictions(
         model,
         title='PICKLE clusters on this model (training RNN; usually teacher-forced)',
@@ -151,12 +150,9 @@ def save_eval_plots(model, run_dir, n_trials, trial_length, tag=''):
     curbd.plot_learned_ei_predictions(model)[0].savefig(
         os.path.join(run_dir, prefix + 'predictions_LEARNED_Dale_EI.png'),
         dpi=120, bbox_inches='tight')
-    if 'reset25_100ms' in by_name and 'trialstarts' in by_name:
-        curbd.plot_tf_vs_honest_psth(
-            model, by_name['reset25_100ms']['pred'], by_name['trialstarts']['pred'],
-            title='Frozen J: 100 ms teacher-force vs trial-start resets',
-        )[0].savefig(os.path.join(run_dir, prefix + 'tf_vs_trialstarts_psth.png'),
-                     dpi=120, bbox_inches='tight')
+    curbd.plot_learned_example_units(model)[0].savefig(
+        os.path.join(run_dir, prefix + 'example_units.png'),
+        dpi=120, bbox_inches='tight')
     curbd.plot_convergence(model)[0].savefig(
         os.path.join(run_dir, prefix + 'convergence.png'), dpi=120, bbox_inches='tight')
     plt.close('all')
@@ -170,6 +166,7 @@ def run_one(data, raw, outdir, nRunTrain, seed=0):
         cfg['nRunTrain'] = nRunTrain
     cfg['why'] = raw['why']
     cfg.setdefault('gamma_gain', 1.0)
+    cfg.setdefault('gamma_l2', 0.0)
     cfg.setdefault('epoch_flip', False)
     cfg.setdefault('flip_every', None)
     cfg.setdefault('flip_margin', 0.05)
@@ -215,6 +212,7 @@ def run_one(data, raw, outdir, nRunTrain, seed=0):
         J_init=J_init,
         gamma_init=cfg['gamma_init'],
         gamma_gain=cfg['gamma_gain'],
+        gamma_l2=cfg.get('gamma_l2', 0.0),
         epoch_flip=cfg['epoch_flip'],
         flip_every=cfg.get('flip_every'),
         flip_margin=cfg['flip_margin'],
@@ -245,6 +243,7 @@ def run_one(data, raw, outdir, nRunTrain, seed=0):
         nRunTrain=cfg['nRunTrain'],
         n_reset=int(len(resetPoints)),
         gamma_gain=cfg['gamma_gain'],
+        gamma_l2=cfg.get('gamma_l2', 0.0),
         epoch_flip=cfg['epoch_flip'],
         pvar0=float(pvars[0]) if len(pvars) else np.nan,
         pvar_peak=float(np.max(pvars)) if len(pvars) else np.nan,

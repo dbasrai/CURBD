@@ -21,6 +21,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import matplotlib
+matplotlib.use('Agg')
 import curbd
 
 DEFAULT_DATASET = os.path.join(
@@ -95,6 +97,8 @@ def main():
                         help='Autonomous simulation duration in seconds (default: training length)')
     parser.add_argument('--poisson', action='store_true',
                         help='Also export Poisson spikes from simulated rates')
+    parser.add_argument('--optoAmp', type=float, default=None,
+                        help='Pseudo-opto pulse amplitude (default: ampInWN; waveform unchanged)')
     parser.add_argument('--plotStatus', action='store_true')
     parser.add_argument('--diagnose', action='store_true',
                         help='After fitting, save J / convergence / rate-match figures')
@@ -115,6 +119,9 @@ def main():
         data['n_trials'], data['trial_length'], data['dtData']))
     for name, idx in data['populations'].items():
         print('  {}: {} units'.format(name, len(idx)))
+    print('  opto target={}  stimulated_region={}  stim_onset={}s'.format(
+        data.get('opto_target_population'), data.get('stimulated_region'),
+        data.get('stim_onset_s')))
 
     model = curbd.trainEIBioMultiRegionRNN(
         data['z_activity'],
@@ -148,6 +155,12 @@ def main():
     model['scaler'] = data['scaler']
     model['dataset_name'] = data['name']
     model['pkl_path'] = data['pkl_path']
+    model['n_trials'] = data['n_trials']
+    model['trial_length'] = data['trial_length']
+    model['opto_target_population'] = data.get('opto_target_population')
+    model['opto_corresponding_e_population'] = data.get('opto_corresponding_e_population')
+    model['stimulated_region'] = data.get('stimulated_region')
+    model['stim_onset_s'] = data.get('stim_onset_s', 0.02)
 
     dale = curbd.check_dale_constraints(model)
     print('Dale check: intra E min={:.4g}  intra I max={:.4g}  '
@@ -164,6 +177,17 @@ def main():
     with open(out_path, 'wb') as f:
         pickle.dump({'model': model, 'ground_truth': gt}, f, protocol=pickle.HIGHEST_PROTOCOL)
     print('Wrote {}'.format(out_path))
+
+    optoAmp = args.optoAmp if args.optoAmp is not None else args.ampInWN
+    opto_fig, _axes, opto = curbd.plot_pseudo_opto_psth(model, optoAmp=optoAmp)
+    opto_path = os.path.join(
+        args.output_dir, 'pseudo_opto_{}.png'.format(data['name']))
+    opto_fig.savefig(opto_path, dpi=150, bbox_inches='tight')
+    print('Pseudo-opto {} n={}  {} trials x {} bins  amp={:g}  saved {}'.format(
+        opto['target_population'], len(opto['target_idx']),
+        opto['n_trials'], opto['trial_length'], opto['optoAmp'], opto_path))
+    import matplotlib.pyplot as plt
+    plt.close(opto_fig)
 
     if args.diagnose:
         curbd.diagnose_ei_model(

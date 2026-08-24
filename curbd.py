@@ -600,6 +600,39 @@ def _binsize_ms_from_name(path):
     return None
 
 
+def _pre_ms_from_name(path):
+    match = re.search(r'pre(\d+)ms', os.path.basename(str(path)))
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg, path=None):
+    """opto_target_population is CFA_I (co9) or RFA_I (co10/co12), not always region2."""
+    merged = {}
+    for src in (yaml_cfg or {}, snapshot_cfg or {}):
+        for key in ('opto_target_population', 'target_population',
+                    'opto_corresponding_e_population', 'stimulated_region'):
+            if src.get(key) and key not in merged:
+                merged[key] = src[key]
+    target = (merged.get('opto_target_population')
+              or merged.get('target_population'))
+    if target is None and merged.get('stimulated_region'):
+        target = '{}_I'.format(merged['stimulated_region'])
+    e_pop = merged.get('opto_corresponding_e_population')
+    if e_pop is None and target and str(target).endswith('_I'):
+        e_pop = target[:-2] + '_E'
+    region = merged.get('stimulated_region')
+    if region is None and target:
+        region = str(target).split('_')[0]
+    return {
+        'opto_target_population': target,
+        'opto_corresponding_e_population': e_pop,
+        'stimulated_region': region,
+        'stim_onset_s': (_pre_ms_from_name(path) or 20) / 1000.0,
+    }
+
+
 def _resolve_ei_dataset_paths(path):
     path = os.path.abspath(os.path.expanduser(str(path)))
     if path.endswith('.yaml'):
@@ -843,6 +876,7 @@ def load_ei_dataset(path, dtFactor=5, smooth_sigma=1.5, zscore=True,
     yaml_cfg = _load_yaml_dict(yaml_path) or {}
     snapshot_cfg = _load_yaml_dict(snapshot_path) or {}
     yaml_neurons = yaml_cfg.get('neurons') or snapshot_cfg.get('neurons') or {}
+    opto_meta = _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg, pkl_path)
 
     offset = 0
     populations = {}
@@ -899,6 +933,10 @@ def load_ei_dataset(path, dtFactor=5, smooth_sigma=1.5, zscore=True,
         'trial_length': int(trial_length),
         'pkl_path': pkl_path,
         'name': os.path.splitext(os.path.basename(pkl_path))[0],
+        'opto_target_population': opto_meta['opto_target_population'],
+        'opto_corresponding_e_population': opto_meta['opto_corresponding_e_population'],
+        'stimulated_region': opto_meta['stimulated_region'],
+        'stim_onset_s': opto_meta['stim_onset_s'],
     }
 
 
@@ -986,15 +1024,62 @@ def _i_across_col_masks(gamma, num_reg1):
     return cfa_i, rfa_i
 
 
-def gamma_from_init(J, num_reg1, ei_sign=None, mode='pickle'):
+def _intra_column_mean(J, num_reg1):
+    """Per-source mean of intra weights. J[i, j] = source j → target i."""
+    n = J.shape[0]
+    score = np.zeros(n, dtype=float)
+    score[:num_reg1] = np.asarray(J)[:num_reg1, :num_reg1].mean(axis=0)
+    score[num_reg1:] = np.asarray(J)[num_reg1:, num_reg1:].mean(axis=0)
+    return score
+
+
+def _n_e_from_targets(n_region, e_frac=None, n_E=None):
+    if n_E is not None:
+        k = int(n_E)
+    elif e_frac is not None:
+        k = int(round(float(e_frac) * n_region))
+    else:
+        k = int(round(0.5 * n_region))
+    return int(np.clip(k, 0, n_region))
+
+
+def gamma_ranked_from_J(J, num_reg1, e_frac=None, n_E=None):
+    """E = highest intra-mean columns in each region, with a count target.
+
+    Unlike i0_sign, this can mark a column E even if its I0 mean is negative,
+    so CFA/RFA E counts are chosen rather than inferred from sign(mean).
+    e_frac: scalar or (cfa, rfa). n_E: (n_cfa_e, n_rfa_e). n_E wins if both set.
+    """
+    n = J.shape[0]
+    score = _intra_column_mean(J, num_reg1)
+    if n_E is None:
+        if e_frac is None:
+            e_frac = 0.5
+        if np.isscalar(e_frac):
+            f1 = f2 = float(e_frac)
+        else:
+            f1, f2 = float(e_frac[0]), float(e_frac[1])
+        k1 = _n_e_from_targets(num_reg1, e_frac=f1)
+        k2 = _n_e_from_targets(n - num_reg1, e_frac=f2)
+    else:
+        k1 = _n_e_from_targets(num_reg1, n_E=n_E[0])
+        k2 = _n_e_from_targets(n - num_reg1, n_E=n_E[1])
+    gamma = -np.ones(n, dtype=float)
+    gamma[np.argsort(-score[:num_reg1])[:k1]] = 1.0
+    gamma[num_reg1 + np.argsort(-score[num_reg1:])[:k2]] = 1.0
+    return gamma
+
+
+def gamma_from_init(J, num_reg1, ei_sign=None, mode='pickle',
+                    e_frac=None, n_E=None):
     """Per-source Dale scalar. J[i, j] is source j → target i, so gamma is a column scale."""
     n = J.shape[0]
     if mode == 'i0_sign':
-        gamma = np.ones(n, dtype=float)
-        gamma[:num_reg1] = np.sign(J[:num_reg1, :num_reg1].mean(axis=0))
-        gamma[num_reg1:] = np.sign(J[num_reg1:, num_reg1:].mean(axis=0))
+        gamma = np.sign(_intra_column_mean(J, num_reg1))
         gamma[gamma == 0] = 1.0
-        return gamma
+        return gamma.astype(float)
+    if mode in ('i0_rank', 'ranked', 'balanced'):
+        return gamma_ranked_from_J(J, num_reg1, e_frac=e_frac, n_E=n_E)
     if ei_sign is None:
         raise ValueError('gamma_from_init mode pickle needs ei_sign')
     gamma = np.where(np.asarray(ei_sign).reshape(-1) > 0, 1.0, -1.0)
@@ -1042,14 +1127,46 @@ def _dale_intra_cone_l2(J_unc, num_reg1):
     return e_l2, i_l2
 
 
+def _enforce_min_e_gamma(gamma_old, gamma_new, num_reg1, min_e_count, pref_i=None):
+    """Keep at least min_e_count E sources per region after a sign update."""
+    if min_e_count is None:
+        return gamma_new
+    gamma_new = np.asarray(gamma_new, dtype=float).copy()
+    old_sign = np.sign(gamma_old)
+    old_sign[old_sign == 0] = 1.0
+    new_sign = np.sign(gamma_new)
+    new_sign[new_sign == 0] = np.sign(old_sign[new_sign == 0])
+    n = gamma_new.size
+    if pref_i is None:
+        pref_i = -np.abs(gamma_new)
+    splits = [(0, num_reg1, int(min_e_count[0])),
+              (num_reg1, n, int(min_e_count[1]))]
+    for lo, hi, kmin in splits:
+        if int(np.sum(new_sign[lo:hi] > 0)) >= kmin:
+            continue
+        became_i = lo + np.where(
+            (old_sign[lo:hi] > 0) & (new_sign[lo:hi] < 0))[0]
+        if len(became_i) == 0:
+            continue
+        order = became_i[np.argsort(pref_i[became_i])]
+        need = kmin - int(np.sum(new_sign[lo:hi] > 0))
+        keep = order[:need]
+        new_sign[keep] = 1.0
+        gamma_new[keep] = np.maximum(np.abs(gamma_new[keep]), 1e-3)
+    return gamma_new
+
+
 def dale_scalar_reassign_from_unc(W, gamma, J_unc, num_reg1, zero_i_across=True,
                                   margin=0.05, eps=1e-8, dJ_acc=None,
-                                  min_update_l2=1e-8):
+                                  min_update_l2=1e-8, min_e_count=None):
     """Flip gamma when FORCE prefers the other intra cone.
 
     Score the accumulated FORCE update dJ_acc when given. Scoring J_unc itself
     almost never flips: the current legal column dominates J + dJ.
-    Rebuilds W by projecting J_unc onto the chosen cone.
+    Rebuilds W by projecting J_unc onto the chosen cone. Flipped units get
+    |gamma|=1 so scale lives in W instead of riding the previous |gamma| to ±10.
+    min_e_count: (n_cfa_e, n_rfa_e) floor. E→I flips that would go below
+    the floor are blocked.
     """
     gamma = np.asarray(gamma, dtype=float).reshape(-1)
     J_unc = np.asarray(J_unc, dtype=float)
@@ -1061,26 +1178,41 @@ def dale_scalar_reassign_from_unc(W, gamma, J_unc, num_reg1, zero_i_across=True,
     strong = (e_l2 + i_l2) > float(min_update_l2)
     new_sign[strong & (i_l2 > e_l2 * (1.0 + margin)) & (old_sign > 0)] = -1.0
     new_sign[strong & (e_l2 > i_l2 * (1.0 + margin)) & (old_sign < 0)] = 1.0
-    mag = np.maximum(np.abs(gamma), 1.0)
-    gamma_new = new_sign * mag
+    gamma_new = new_sign * np.abs(gamma)
+    flipped = new_sign != old_sign
+    gamma_new[flipped] = new_sign[flipped]
+    gamma_new = _enforce_min_e_gamma(
+        gamma, gamma_new, num_reg1, min_e_count, pref_i=(i_l2 - e_l2))
     W = _init_W_from_J_gamma(J_unc, gamma_new, num_reg1, zero_i_across, eps)
     J = j_from_dale_scalar(W, gamma_new, num_reg1, zero_i_across)
-    n_flip = int(np.sum(new_sign != old_sign))
+    n_flip = int(np.sum(np.sign(gamma_new) != old_sign))
     return W, gamma_new, J, n_flip
 
 
 def dale_scalar_force_step(W, gamma, dJ, num_reg1, zero_i_across=True,
-                           eps=1e-8, gamma_clip=10.0, gamma_gain=1.0):
+                           eps=1e-8, gamma_clip=10.0, gamma_gain=1.0,
+                           min_e_count=None, gamma_l2=0.0):
     """FORCE step on {gamma, W}: least-squares gamma, then project J+dJ onto gamma * R_+.
 
     Each source column stays single-signed. gamma is unconstrained and can flip E↔I.
     gamma_gain > 1 amplifies the LS gamma step so signs can actually cross 0.
+    min_e_count blocks E→I crossings that would drop a region below its E floor.
+    gamma_l2: ridge of |gamma| toward 1, scaled by median ||softplus(W)||^2 so it
+        mainly rescues collapsed-W columns (the ±10 clip) rather than shrinking
+        healthy |gamma|. 0 = vanilla LS.
     """
     gamma = np.asarray(gamma, dtype=float).reshape(-1)
     sp = _softplus(W)
     J_old = gamma.reshape(1, -1) * sp
     denom = np.sum(sp * sp, axis=0) + eps
-    gamma_new = gamma + float(gamma_gain) * np.sum(dJ * sp, axis=0) / denom
+    gamma_ls = gamma + float(gamma_gain) * np.sum(dJ * sp, axis=0) / denom
+    lam = float(gamma_l2) * max(float(np.median(denom)), 1e-4)
+    if lam > 0:
+        t = np.sign(gamma)
+        t[t == 0] = 1.0
+        gamma_new = (gamma_ls * denom + lam * t) / (denom + lam)
+    else:
+        gamma_new = gamma_ls
     gamma_new = np.clip(gamma_new, -gamma_clip, gamma_clip)
     J_unc = J_old + dJ
     tiny = np.abs(gamma_new) < 1e-4
@@ -1088,6 +1220,9 @@ def dale_scalar_force_step(W, gamma, dJ, num_reg1, zero_i_across=True,
         e_l2, i_l2 = _dale_intra_cone_l2(J_unc, num_reg1)
         s = np.where(e_l2[tiny] >= i_l2[tiny], 1.0, -1.0)
         gamma_new[tiny] = s * 1e-3
+    e_l2, i_l2 = _dale_intra_cone_l2(J_unc, num_reg1)
+    gamma_new = _enforce_min_e_gamma(
+        gamma, gamma_new, num_reg1, min_e_count, pref_i=(i_l2 - e_l2))
     target = np.maximum(J_unc / gamma_new.reshape(1, -1), eps)
     if zero_i_across:
         cfa_i, rfa_i = _i_across_col_masks(gamma_new, num_reg1)
@@ -1138,7 +1273,11 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         gamma_gain=1.0,
                         epoch_flip=False,
                         flip_every=None,
-                        flip_margin=0.05):
+                        flip_margin=0.05,
+                        e_frac=None,
+                        n_E=None,
+                        min_e_frac=None,
+                        gamma_l2=0.0):
     """Bio FORCE loop with sequential constraints.
 
     zero_i_across: I columns do not project to the other region (identically 0);
@@ -1154,10 +1293,14 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
         and may flip identity. I-across follows gamma < 0 if zero_i_across.
 
     gamma_gain: scale the FORCE least-squares step on gamma (1 = vanilla LS).
+    gamma_l2: ridge |gamma| toward 1 during the FORCE LS step (0 = off).
+        Identity flips always rebuild with |gamma|=1; scale goes into W.
     epoch_flip: after each training run, reassign signs from unconstrained
         intra cone mass (J_anchor + accumulated dJ).
     flip_every: also reassign every this many data bins during a run (e.g. 41
         = once per trial). None = only epoch_flip / LS crossing.
+    e_frac / n_E: for gamma_init i0_rank, per-region E fraction or counts.
+    min_e_frac: during epoch_flip, do not let a region fall below this E fraction.
     """
     if intra_reparam and dale_scalar:
         raise ValueError('intra_reparam and dale_scalar are mutually exclusive')
@@ -1244,6 +1387,22 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     n_E_hist = []
     pickle_agree_hist = []
     n_flip_hist = []
+    n_E_kw = n_E
+    if n_E_kw == 'pickle' and populations:
+        n_E_kw = (
+            len(np.asarray(populations['CFA_E'])),
+            len(np.asarray(populations['RFA_E'])),
+        )
+    min_e_count = None
+    if min_e_frac is not None:
+        if np.isscalar(min_e_frac):
+            f1 = f2 = float(min_e_frac)
+        else:
+            f1, f2 = float(min_e_frac[0]), float(min_e_frac[1])
+        min_e_count = (
+            _n_e_from_targets(num_reg1, e_frac=f1),
+            _n_e_from_targets(number_units - num_reg1, e_frac=f2),
+        )
     if dale_scalar:
         if np.ndim(gamma_init) > 0:
             gamma = np.asarray(gamma_init, dtype=float).reshape(-1)
@@ -1252,7 +1411,8 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                     gamma.shape[0], number_units))
         else:
             gamma = gamma_from_init(
-                J, num_reg1, ei_sign=ei_sign_init, mode=gamma_init)
+                J, num_reg1, ei_sign=ei_sign_init, mode=gamma_init,
+                e_frac=e_frac, n_E=n_E_kw)
         gamma0 = gamma.copy()
         W = _init_W_from_J_gamma(
             J, gamma, num_reg1, zero_i_across=zero_i_across)
@@ -1346,14 +1506,17 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         W, gamma, J = dale_scalar_force_step(
                             W, gamma, dJ, num_reg1,
                             zero_i_across=zero_i_across,
-                            gamma_gain=gamma_gain)
+                            gamma_gain=gamma_gain,
+                            min_e_count=min_e_count,
+                            gamma_l2=gamma_l2)
                         if (epoch_flip and flip_every is not None
                                 and int(flip_every) > 0
                                 and iLearn % int(flip_every) == 0):
                             W, gamma, J, nf = dale_scalar_reassign_from_unc(
                                 W, gamma, J_anchor + dJ_acc, num_reg1,
                                 zero_i_across=zero_i_across,
-                                margin=flip_margin, dJ_acc=dJ_acc)
+                                margin=flip_margin, dJ_acc=dJ_acc,
+                                min_e_count=min_e_count)
                             n_flip_run += nf
                             J_anchor = J.copy()
                             dJ_acc[:] = 0.0
@@ -1379,7 +1542,7 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
             W, gamma, J, nf = dale_scalar_reassign_from_unc(
                 W, gamma, J_anchor + dJ_acc, num_reg1,
                 zero_i_across=zero_i_across, margin=flip_margin,
-                dJ_acc=dJ_acc)
+                dJ_acc=dJ_acc, min_e_count=min_e_count)
             n_flip_run += nf
             J = j_from_dale_scalar(W, gamma, num_reg1, zero_i_across)
 
@@ -1492,6 +1655,7 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     out_params['intra_reparam'] = bool(intra_reparam)
     out_params['dale_scalar'] = bool(dale_scalar)
     out_params['gamma_gain'] = float(gamma_gain)
+    out_params['gamma_l2'] = float(gamma_l2)
     out_params['epoch_flip'] = bool(epoch_flip)
     out_params['flip_every'] = None if flip_every is None else int(flip_every)
     out_params['flip_margin'] = float(flip_margin)
@@ -2879,6 +3043,179 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     return sim[:,dtStab:]
 
 
+def resolve_opto_target_population(model):
+    """Dataset yaml label (CFA_I or RFA_I), not the old J-sum / region2 heuristic."""
+    name = model.get('opto_target_population')
+    if name:
+        return str(name)
+    pkl_path = model.get('pkl_path')
+    if pkl_path:
+        pkl_path, yaml_path, snapshot_path = _resolve_ei_dataset_paths(pkl_path)
+        meta = _opto_fields_from_cfgs(
+            _load_yaml_dict(yaml_path), _load_yaml_dict(snapshot_path), pkl_path)
+        if meta.get('opto_target_population'):
+            return str(meta['opto_target_population'])
+    pops = model.get('populations') or {}
+    for fallback in ('RFA_I', 'CFA_I'):
+        if fallback in pops and len(np.asarray(pops[fallback])):
+            return fallback
+    raise ValueError('Could not resolve opto_target_population from model or dataset yaml')
+
+
+def opto_target_indices(model, target_population=None):
+    """Unit indices for the dataset's stimulated I population."""
+    name = target_population or resolve_opto_target_population(model)
+    pops = model.get('populations') or {}
+    if name not in pops:
+        raise KeyError('opto target {} not in populations {}'.format(
+            name, list(pops.keys())))
+    idx = np.asarray(pops[name], dtype=int)
+    if idx.size == 0:
+        raise ValueError('opto target population {} is empty'.format(name))
+    return name, idx
+
+
+def _opto_inhib_pulse(n_units, n_times, target_idx, stim_mask, optoAmp):
+    """Existing inhib_only protocol: +half-normal current on target units while on."""
+    optoInp = np.zeros((n_units, n_times))
+    on = np.where(np.asarray(stim_mask, dtype=bool))[0]
+    target_idx = np.asarray(target_idx, dtype=int)
+    n_tgt = int(target_idx.size)
+    if n_tgt == 0 or on.size == 0:
+        return optoInp
+    for i in on:
+        optoInp[target_idx, i] = truncnorm.rvs(
+            a=0, b=np.inf, loc=0, scale=1, size=n_tgt)
+    return float(optoAmp) * optoInp
+
+
+def _trial_stim_mask(n_times, n_trials, trial_rnn, dtRNN, stim_onset_s, dur):
+    """25 ms (default) pulse on every trial, starting at the dataset pre window."""
+    mask = np.zeros(n_times, dtype=bool)
+    onset_steps = int(stim_onset_s / dtRNN)
+    dur_steps = max(1, int(dur / dtRNN))
+    for tr in range(int(n_trials)):
+        start = int(tr) * int(trial_rnn) + onset_steps
+        stop = min(start + dur_steps, n_times)
+        if start < n_times:
+            mask[max(start, 0):stop] = True
+    return mask
+
+
+def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
+                                target_population=None, dur=0.025, optoAmp=None,
+                                stim_onset_s=None, seed=0, reuse_wn=True,
+                                with_control=True):
+    """Trial-start rollout with the existing I-cell opto pulse on the dataset target.
+
+    Does not change the stim waveform (positive truncated-normal, 25 ms, optoAmp).
+    Control and opto share the same white noise and trial-start resets from Adata.
+    """
+    params = model['params']
+    Adata = np.asarray(model['Adata'], dtype=float)
+    J = np.asarray(model['J'], dtype=float)
+    dtData = float(model.get('dtData', params.get('dtData', 0.02)))
+    dtFactor = int(params['dtFactor'])
+    dtRNN = float(model.get('dtRNN', dtData / float(dtFactor)))
+    tauRNN = float(params['tauRNN'])
+    nonLinearity = params['nonLinearity']
+    number_units = int(params['number_units'])
+    if n_trials is None:
+        n_trials = model.get('n_trials')
+    if trial_length is None:
+        trial_length = model.get('trial_length')
+    if n_trials is None or trial_length is None:
+        n_trials, trial_length = _trial_shape(
+            Adata.shape[1], trial_length=trial_length)
+    n_trials = int(n_trials)
+    trial_length = int(trial_length)
+    n_data = n_trials * trial_length
+    if Adata.shape[1] < n_data:
+        n_trials = Adata.shape[1] // trial_length
+        n_data = n_trials * trial_length
+    Adata = Adata[:, :n_data]
+
+    target_name, target_idx = opto_target_indices(model, target_population)
+    if optoAmp is None:
+        optoAmp = params.get('ampInWN', 0.001)
+    if stim_onset_s is None:
+        stim_onset_s = model.get('stim_onset_s', 0.02)
+
+    trial_rnn = trial_length * dtFactor
+    n_rnn = n_trials * trial_rnn
+    tRNN = np.arange(n_rnn, dtype=float) * dtRNN
+    tData = dtData * np.arange(n_data)
+    resetPoints = make_reset_points(n_trials, trial_length, dtFactor, None)
+    reset_set = set(int(x) for x in resetPoints)
+
+    if reuse_wn and model.get('inputWN') is not None:
+        inputWN = np.asarray(model['inputWN'], dtype=float)[:, :n_rnn]
+        if inputWN.shape[1] < n_rnn:
+            reuse_wn = False
+    if not (reuse_wn and model.get('inputWN') is not None):
+        npr.seed(seed)
+        tauWN = float(params.get('tauWN', 0.1))
+        ampInWN = float(params.get('ampInWN', 0.001))
+        ampWN = math.sqrt(tauWN / dtRNN)
+        iWN = ampWN * npr.randn(number_units, n_rnn)
+        inputWN = np.ones((number_units, n_rnn))
+        for tt in range(1, n_rnn):
+            inputWN[:, tt] = iWN[:, tt] + (inputWN[:, tt - 1] - iWN[:, tt]) * np.exp(-(dtRNN / tauWN))
+        inputWN = ampInWN * inputWN
+
+    stim_mask = _trial_stim_mask(
+        n_rnn, n_trials, trial_rnn, dtRNN, float(stim_onset_s), float(dur))
+    npr.seed(seed + 1)
+    optoInp = _opto_inhib_pulse(number_units, n_rnn, target_idx, stim_mask, optoAmp)
+
+    reset_state = params.get('reset_state', 'rate')
+    nonLinearity_inv = params.get('nonLinearity_inv', np.arctanh)
+
+    def _rollout(extra_input):
+        RNN = np.zeros((number_units, n_rnn))
+        H = _hidden_from_rates(Adata[:, 0], reset_state, nonLinearity_inv)
+        if H.ndim == 1:
+            H = H[:, None]
+        RNN[:, 0, np.newaxis] = nonLinearity(H)
+        for tt in range(1, n_rnn):
+            if tt in reset_set:
+                timepoint = min(int(math.floor(tt / dtFactor)), Adata.shape[1] - 1)
+                H = _hidden_from_rates(Adata[:, timepoint], reset_state, nonLinearity_inv)
+                if H.ndim == 1:
+                    H = H[:, None]
+            RNN[:, tt, np.newaxis] = nonLinearity(H)
+            JR = (J.dot(RNN[:, tt]).reshape((number_units, 1))
+                  + inputWN[:, tt, np.newaxis]
+                  + extra_input[:, tt, np.newaxis])
+            H = H + dtRNN * (-H + JR) / tauRNN
+        return RNN
+
+    RNN_opto = _rollout(optoInp)
+    RNN_ctrl = _rollout(np.zeros_like(optoInp)) if with_control else None
+
+    i_model = np.array([(np.abs(tRNN - t)).argmin() for t in tData], dtype=int)
+    i_model = np.clip(i_model, 0, n_rnn - 1)
+    pred_opto = RNN_opto[:, i_model]
+    pred_ctrl = None if RNN_ctrl is None else RNN_ctrl[:, i_model]
+    stim_mask_data = stim_mask[i_model]
+    return {
+        'target_population': target_name,
+        'target_idx': target_idx,
+        'n_trials': n_trials,
+        'trial_length': trial_length,
+        'dur': float(dur),
+        'optoAmp': float(optoAmp),
+        'stim_onset_s': float(stim_onset_s),
+        'stim_mask': stim_mask,
+        'stim_mask_data': stim_mask_data,
+        'RNN_ctrl': RNN_ctrl,
+        'RNN_opto': RNN_opto,
+        'pred_ctrl': pred_ctrl,
+        'pred_opto': pred_opto,
+        'Adata': Adata,
+    }
+
+
 def plotFit(model):
     pVars = model['pVars']
     RNN = model['RNN']
@@ -3807,11 +4144,9 @@ def plot_convergence(model, ax=None):
     runs = np.arange(len(pVars))
     axes[0].plot(runs, pVars, marker='o', ms=3)
     axes[0].axhline(0.0, color='k', lw=0.6)
-    axes[0].axhline(0.5, color='0.5', ls='--', lw=0.8, label='usable ~0.5')
     axes[0].set_xlabel('training run')
     axes[0].set_ylabel('pVar')
     axes[0].set_title('variance explained (higher is better)')
-    axes[0].legend(fontsize=8)
     if len(axes) > 1:
         axes[1].plot(np.arange(len(chi2s)), chi2s, marker='o', ms=3, color='C1')
         axes[1].set_xlabel('training run')
@@ -3901,11 +4236,32 @@ def plot_rate_match(model, n_trials=8, ax=None):
     return fig, (ax0, ax1, ax_sc, ax_tr, ax_r2)
 
 
-def _trial_shape(n_time):
-    for trial_len in (41, 40, 20, 10, 50):
+def _trial_shape(n_time, trial_length=None):
+    if trial_length is not None:
+        trial_length = int(trial_length)
+        if trial_length > 0 and n_time >= trial_length and n_time % trial_length == 0:
+            return n_time // trial_length, trial_length
+    for trial_len in (41, 40, 20, 11, 10, 50):
         if n_time >= trial_len and n_time % trial_len == 0:
             return n_time // trial_len, trial_len
     return 1, n_time
+
+
+def _example_unit_index(idx, Adata):
+    """Pick a unit whose trial-mean PSTH actually modulates (not a silent midpoint)."""
+    idx = np.asarray(idx, dtype=int)
+    if idx.size == 0:
+        return None
+    n_trials, trial_len = _trial_shape(Adata.shape[1])
+    rates = Adata[idx]
+    if n_trials < 2 or rates.shape[1] != n_trials * trial_len:
+        std = np.std(rates, axis=1)
+        std = np.where(np.isfinite(std), std, -np.inf)
+        return int(idx[int(np.argmax(std))])
+    psth = rates.reshape(len(idx), n_trials, trial_len).mean(axis=1)
+    mod = np.std(psth, axis=1)
+    mod = np.where(np.isfinite(mod), mod, -np.inf)
+    return int(idx[int(np.argmax(mod))])
 
 
 def plot_population_predictions(model, n_show_trials=8, pred=None, title=None):
@@ -3961,12 +4317,13 @@ def plot_population_predictions(model, n_show_trials=8, pred=None, title=None):
 
         ax1 = fig.add_subplot(gs[row, 1])
         t_all = np.arange(Tshow) * dt_ms
-        ax1.plot(t_all, A[len(idx)//2, :Tshow], color=color, lw=0.9, label='ex. unit data')
-        ax1.plot(t_all, P[len(idx)//2, :Tshow], color='k', lw=0.9, ls='--', label='RNN')
+        u = _example_unit_index(idx, Adata)
+        ax1.plot(t_all, Adata[u, :Tshow], color=color, lw=0.9, label='ex. unit data')
+        ax1.plot(t_all, pred[u, :Tshow], color='k', lw=0.9, ls='--', label='RNN')
         for k in range(1, n_show):
             ax1.axvline(k * trial_len * dt_ms, color='0.8', lw=0.5)
         ax1.set_ylabel('rate')
-        ax1.set_title('pickle {} example unit, {} trials'.format(name, n_show))
+        ax1.set_title('pickle {} example unit {}, {} trials'.format(name, u, n_show))
         if row == len(pops) - 1:
             ax1.set_xlabel('time (ms)')
 
@@ -4027,6 +4384,56 @@ def plot_tf_vs_honest_psth(model, pred_tf, pred_honest, title=None):
     return fig, axes
 
 
+def plot_pseudo_opto_psth(model, opto=None, title=None, **sim_kwargs):
+    """Full-trial mean rates on pseudo-opto vs control (not a 5-bin stim snippet)."""
+    if opto is None:
+        opto = simulate_pseudo_opto_trials(model, **sim_kwargs)
+    Adata = np.asarray(opto['Adata'])
+    pred_ctrl = np.asarray(opto['pred_ctrl'])
+    pred_opto = np.asarray(opto['pred_opto'])
+    n_trials = int(opto['n_trials'])
+    trial_len = int(opto['trial_length'])
+    dt_ms = float(model.get('dtData', 0.02)) * 1000.0
+    t_ms = np.arange(trial_len) * dt_ms
+    onset_ms = float(opto['stim_onset_s']) * 1000.0
+    offset_ms = onset_ms + float(opto['dur']) * 1000.0
+    target_name = opto['target_population']
+    pops = _ordered_populations(model['populations'])
+    fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.2), sharex=True)
+    axes = axes.ravel()
+    for ax, (_s, _e, name, idx) in zip(axes, pops):
+        idx = np.asarray(idx)
+        color = POP_COLORS.get(name, 'k')
+        A_tr = Adata[idx].reshape(len(idx), n_trials, trial_len)
+        C_tr = pred_ctrl[idx].reshape(len(idx), n_trials, trial_len)
+        O_tr = pred_opto[idx].reshape(len(idx), n_trials, trial_len)
+        A_psth = A_tr.mean(axis=(0, 1))
+        C_psth = C_tr.mean(axis=(0, 1))
+        O_psth = O_tr.mean(axis=(0, 1))
+        O_sem = O_tr.mean(axis=0).std(axis=0) / np.sqrt(max(n_trials, 1))
+        ax.axvspan(onset_ms, offset_ms, color='0.85', lw=0, zorder=0)
+        ax.plot(t_ms, A_psth, color=color, lw=1.6, label='data')
+        ax.plot(t_ms, C_psth, color='0.35', lw=1.3, ls=':', label='RNN control')
+        ax.plot(t_ms, O_psth, color='k', lw=1.6, label='RNN opto')
+        ax.fill_between(t_ms, O_psth - O_sem, O_psth + O_sem, color='k', alpha=0.12, lw=0)
+        n_tgt = len(idx)
+        suffix = '  TARGET' if name == target_name else ''
+        ax.set_title('pickle {}  n={}{}'.format(name, n_tgt, suffix))
+        ax.set_ylabel('mean rate')
+        ax.legend(fontsize=7, loc='upper right')
+    axes[2].set_xlabel('time in trial (ms)')
+    axes[3].set_xlabel('time in trial (ms)')
+    fig.suptitle(
+        title or (
+            'Pseudo-opto: +half-normal I stim, {:.0f} ms pulse on {} '
+            '(amp={:g}), full {}-bin trials'
+        ).format(
+            float(opto['dur']) * 1000.0, target_name, opto['optoAmp'], trial_len),
+        fontsize=11)
+    fig.tight_layout()
+    return fig, axes, opto
+
+
 def plot_dale_scalar_diagnostics(model):
     """Gamma, E local-vs-across, and per-population R2 for a dale-scalar fit."""
     Adata, pred = model_rates_at_data(model)
@@ -4044,9 +4451,12 @@ def plot_dale_scalar_diagnostics(model):
     ax.scatter(gamma0, gamma, s=12, c=np.where(e, POP_COLORS['CFA_E'], POP_COLORS['CFA_I']), alpha=0.7)
     ax.axhline(0, color='k', lw=0.5)
     ax.axvline(0, color='k', lw=0.5)
+    ax.axhline(10.0, color='0.5', ls='--', lw=0.7)
+    ax.axhline(-10.0, color='0.5', ls='--', lw=0.7)
     ax.set_xlabel('gamma init (sign of I0 intra column mean)')
     ax.set_ylabel('learned gamma')
-    ax.set_title('Dale scalar is not clamped at ±1')
+    n_clip = int(np.sum(np.abs(gamma) >= 10.0 - 1e-6))
+    ax.set_title('Dale scalar; {} units at ±10 FORCE clip'.format(n_clip))
 
     ax = fig.add_subplot(gs[0, 1])
     loc = np.zeros(n)
@@ -4063,13 +4473,16 @@ def plot_dale_scalar_diagnostics(model):
     ax.legend(fontsize=7)
 
     ax = fig.add_subplot(gs[0, 2])
-    bins = np.linspace(-2.4, 2.4, 25)
+    gmax = max(10.5, float(np.max(np.abs(gamma))) + 0.5)
+    bins = np.linspace(-gmax, gmax, 43)
     ax.hist(gamma[~e], bins=bins, color=POP_COLORS['CFA_I'], alpha=0.75, label='I')
     ax.hist(gamma[e], bins=bins, color=POP_COLORS['CFA_E'], alpha=0.85, label='E')
     ax.axvline(0, color='k', lw=0.6)
+    ax.axvline(10.0, color='0.5', ls='--', lw=0.8)
+    ax.axvline(-10.0, color='0.5', ls='--', lw=0.8)
     ax.set_xlabel('learned gamma')
     ax.set_ylabel('units')
-    ax.set_title('gamma distribution (empty around 0)')
+    ax.set_title('gamma (dashed = clip ±10)')
     ax.legend(fontsize=7)
 
     ax = fig.add_subplot(gs[1, :])
@@ -4152,13 +4565,13 @@ def plot_learned_ei_predictions(model, n_show_trials=8):
         if row == 3:
             ax0.set_xlabel('time in trial (ms)')
         t_all = np.arange(Tshow) * dt_ms
-        u = int(idx[len(idx) // 2])
+        u = _example_unit_index(idx, Adata)
         ax1.plot(t_all, Adata[u, :Tshow], color=color, lw=0.9)
         ax1.plot(t_all, pred[u, :Tshow], color='k', lw=0.9, ls='--')
         for k in range(1, n_show):
             ax1.axvline(k * trial_len * dt_ms, color='0.8', lw=0.5)
         ax1.set_ylabel('rate')
-        ax1.set_title('{} example unit'.format(name))
+        ax1.set_title('{} example unit {}'.format(name, u))
         if row == 3:
             ax1.set_xlabel('time (ms)')
         step = max(1, A.size // 8000)
@@ -4171,9 +4584,50 @@ def plot_learned_ei_predictions(model, n_show_trials=8):
         ax2.set_title('{} bins'.format(name))
     fig.suptitle(
         'Predictions grouped by LEARNED Dale identity (sign of gamma). '
-        'Climbing, teacher-forced.',
+        'Solid=data, dashed=RNN (100 ms teacher-force).',
         y=0.995, fontsize=11)
     return fig, None
+
+
+def plot_learned_example_units(model, n_show_trials=8, pred=None):
+    """One example unit per learned CFA/RFA E/I group. Data vs 100 ms TF only."""
+    Adata, pred_m = model_rates_at_data(model)
+    if pred is None:
+        pred = pred_m
+    else:
+        pred = np.asarray(pred)
+        T = min(Adata.shape[1], pred.shape[1])
+        Adata = Adata[:, :T]
+        pred = pred[:, :T]
+    n_trials, trial_len = _trial_shape(Adata.shape[1])
+    dt_ms = float(model.get('dtData', 0.02)) * 1000.0
+    n_show = min(n_show_trials, n_trials)
+    Tshow = n_show * trial_len
+    t_all = np.arange(Tshow) * dt_ms
+    groups = learned_region_ei_groups(model)
+    fig, axes = plt.subplots(len(groups), 1, figsize=(11.5, 10.2), sharex=True)
+    if len(groups) == 1:
+        axes = [axes]
+    for ax, (name, idx, color) in zip(axes, groups):
+        idx = np.asarray(idx)
+        if len(idx) == 0:
+            ax.set_title('{}  n=0'.format(name))
+            continue
+        u = _example_unit_index(idx, Adata)
+        ax.plot(t_all, Adata[u, :Tshow], color=color, lw=1.2, label='data u{}'.format(u))
+        ax.plot(t_all, pred[u, :Tshow], color='k', lw=1.15, ls='--', label='RNN 100 ms TF')
+        for k in range(1, n_show):
+            ax.axvline(k * trial_len * dt_ms, color='0.7', lw=0.8)
+        ax.set_ylabel('rate')
+        ax.set_title('{}  n={}  unit {}'.format(name, len(idx), u))
+        ax.legend(fontsize=7, loc='upper right')
+    axes[-1].set_xlabel('time (ms); vertical line = trial boundary')
+    fig.suptitle(
+        'Example units, one per learned population. Solid=data, dashed=RNN '
+        '(100 ms teacher-force).',
+        fontsize=11)
+    fig.tight_layout()
+    return fig, axes
 
 
 def plot_ei_count_comparison(model):
@@ -4234,6 +4688,7 @@ def diagnose_ei_model(model, outdir=None, prefix='ei_diag', show=False):
         'init': plot_init_distributions(model, which='J0')[0],
         'convergence': plot_convergence(model)[0],
         'rates': plot_rate_match(model)[0],
+        'pseudo_opto': plot_pseudo_opto_psth(model)[0],
     }
     saved = {}
     if outdir is not None:
