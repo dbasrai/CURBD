@@ -259,9 +259,9 @@ def main():
     parser.add_argument('--tag', default=None,
                         help='Name prefix (default: dataset stem co9/co10/...)')
     parser.add_argument('--sparse-percent', type=float, default=60,
-                        help='E-across column sparsify (0 = dense E cross). '
-                             'Dale-scalar already skips this during FORCE; '
-                             'it still matters for the I0 warm-start.')
+                        help='Zero this percent of weakest E-across columns each '
+                             'FORCE epoch (20 keeps ~80%% of E-across). '
+                             '0 = dense E-across. Also used for the I0 warm-start.')
     args = parser.parse_args()
 
     data = curbd.load_ei_dataset(

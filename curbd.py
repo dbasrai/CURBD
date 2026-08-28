@@ -1016,6 +1016,52 @@ def _inv_softplus(y, eps=1e-12):
     return out
 
 
+def _input_at(inp, tt, dtFactor=1, shift_data_bins=1):
+    """External current at RNN step tt, advanced by shift_data_bins data bins.
+
+    The Euler step writes RNN[tt] from H, then adds input into H, so a drive
+    indexed at tt first appears in RNN[tt+1]. Shifting the waveform earlier
+    by one data bin (dtFactor RNN steps) lines the sampled rates up with
+    the intended timepoint.
+    """
+    inp = np.asarray(inp, dtype=float)
+    idx = int(tt) + int(shift_data_bins) * int(dtFactor)
+    if idx < 0 or idx >= inp.shape[1]:
+        return np.zeros((inp.shape[0], 1), dtype=float)
+    return inp[:, idx].reshape(-1, 1)
+
+
+def _sparsify_e_across_columns(J, W, gamma, num_reg1, percentile, w_off=None):
+    """Zero weakest E-across source columns (keep the strongest long-range E).
+
+    percentile is the percent of E-across columns to drop, per region.
+    """
+    if percentile is None or float(percentile) <= 0:
+        return J, W
+    if w_off is None:
+        w_off = _inv_softplus(1e-8)
+    gamma = np.asarray(gamma).reshape(-1)
+    e1 = np.where(gamma[:num_reg1] > 0)[0]
+    e2 = np.where(gamma[num_reg1:] > 0)[0]
+    if len(e2):
+        temp = np.sum(np.abs(J[:num_reg1, num_reg1:][:, e2]), axis=0)
+        low_indices, _ = get_lows(temp, percentile=percentile)
+        if len(low_indices[0]):
+            weak = e2[low_indices[0]]
+            J[:num_reg1, num_reg1:][:, weak] = 0.0
+            if W is not None:
+                W[:num_reg1, num_reg1:][:, weak] = w_off
+    if len(e1):
+        temp = np.sum(np.abs(J[num_reg1:, :num_reg1][:, e1]), axis=0)
+        low_indices, _ = get_lows(temp, percentile=percentile)
+        if len(low_indices[0]):
+            weak = e1[low_indices[0]]
+            J[num_reg1:, :num_reg1][:, weak] = 0.0
+            if W is not None:
+                W[num_reg1:, :num_reg1][:, weak] = w_off
+    return J, W
+
+
 def _i_across_col_masks(gamma, num_reg1):
     """Boolean source-column masks for I cells (gamma < 0) in each region."""
     cols = np.arange(gamma.shape[0])
@@ -1277,7 +1323,8 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                         e_frac=None,
                         n_E=None,
                         min_e_frac=None,
-                        gamma_l2=0.0):
+                        gamma_l2=0.0,
+                        input_shift_data_bins=1):
     """Bio FORCE loop with sequential constraints.
 
     zero_i_across: I columns do not project to the other region (identically 0);
@@ -1295,6 +1342,8 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     gamma_gain: scale the FORCE least-squares step on gamma (1 = vanilla LS).
     gamma_l2: ridge |gamma| toward 1 during the FORCE LS step (0 = off).
         Identity flips always rebuild with |gamma|=1; scale goes into W.
+    input_shift_data_bins: advance WN (and later opto) this many data bins
+        so the Euler update does not integrate drive one timepoint late.
     epoch_flip: after each training run, reassign signs from unconstrained
         intra cone mass (J_anchor + accumulated dJ).
     flip_every: also reassign every this many data bins during a run (e.g. 41
@@ -1484,7 +1533,7 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
                     H = H[:, None]
             RNN[:, tt, np.newaxis] = nonLinearity(H)
             JR = (J.dot(RNN[:, tt]).reshape((number_units, 1)) +
-                  inputWN[:, tt, np.newaxis])
+                  _input_at(inputWN, tt, dtFactor, input_shift_data_bins))
             H = H + dtRNN * (-H + JR) / tauRNN
             if tLearn >= dtData:
                 tLearn = 0
@@ -1546,12 +1595,16 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
             n_flip_run += nf
             J = j_from_dale_scalar(W, gamma, num_reg1, zero_i_across)
 
-        # Dale-scalar E cells keep both local and across; Bio column-sparsify
-        # would zero entire E-across columns (local XOR long-range).
-        if nRun < nRunTrain and sparse_percent > 0 and not dale_scalar:
+        # E-across column sparsify: drop the weakest `percentile` of E sources'
+        # long-range columns (keep the rest). Dale-scalar uses current gamma>0
+        # columns and pins W so the next j_from_dale_scalar does not restore them.
+        if nRun < nRunTrain and sparse_percent > 0:
             percentile = percentile_list[nRun]
             print(percentile)
-            if zero_i_across:
+            if dale_scalar:
+                J, W = _sparsify_e_across_columns(
+                    J, W, gamma, num_reg1, percentile)
+            elif zero_i_across:
                 if len(e2_rel):
                     temp = np.sum(J[:num_reg1, num_reg1:][:, e2_rel], axis=0)
                     low_indices, high_indices = get_lows(temp, percentile=percentile)
@@ -1623,6 +1676,12 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
 
     if dale_scalar:
         J = j_from_dale_scalar(W, gamma, num_reg1, zero_i_across)
+        if sparse_percent > 0:
+            J, W = _sparsify_e_across_columns(
+                J, W, gamma, num_reg1, sparse_percent, w_off=-40.0)
+            J = j_from_dale_scalar(W, gamma, num_reg1, zero_i_across)
+            J, W = _sparsify_e_across_columns(
+                J, W, gamma, num_reg1, sparse_percent, w_off=-40.0)
         ei_sign = np.where(gamma >= 0, 1.0, -1.0)
     elif zero_i_across:
         J[masks['inter_i']] = 0.0
@@ -1651,6 +1710,7 @@ def trainBioConstrainedRNN(activity, dtData=1, dtFactor=1, g=1.5, tauRNN=0.01,
     out_params['nonLinearity'] = nonLinearity
     out_params['resetPoints'] = resetPoints
     out_params['sparse_percent'] = sparse_percent
+    out_params['input_shift_data_bins'] = int(input_shift_data_bins)
     out_params['zero_i_across'] = bool(zero_i_across)
     out_params['intra_reparam'] = bool(intra_reparam)
     out_params['dale_scalar'] = bool(dale_scalar)
@@ -1734,6 +1794,7 @@ def rollout_frozen_j(model, reset_every='train', n_trials=None, trial_length=Non
     number_units = int(params['number_units'])
     tData = np.asarray(model.get('tData', dtData * np.arange(Adata.shape[1])))
     tRNN = np.asarray(model.get('tRNN', np.arange(0, tData[-1] + dtRNN, dtRNN)))
+    input_shift = int(params.get('input_shift_data_bins', 1))
     if n_trials is None or trial_length is None:
         n_trials, trial_length = _trial_shape(Adata.shape[1])
     if reset_every == 'train':
@@ -1773,7 +1834,7 @@ def rollout_frozen_j(model, reset_every='train', n_trials=None, trial_length=Non
                 H = H[:, None]
         RNN[:, tt, np.newaxis] = nonLinearity(H)
         JR = (J.dot(RNN[:, tt]).reshape((number_units, 1)) +
-              inputWN[:, tt, np.newaxis])
+              _input_at(inputWN, tt, dtFactor, input_shift))
         H = H + dtRNN * (-H + JR) / tauRNN
 
     i_model = np.array([(np.abs(tRNN - t)).argmin() for t in tData], dtype=int)
@@ -3043,6 +3104,45 @@ def simulate(model, t, tauRNN=None, ampInWN=None, tauWN=None):
     return sim[:,dtStab:]
 
 
+def dale_populations(model):
+    """Region x Dale-gamma groups (CFA then RFA). Not pickle EI labels.
+
+    Pickle populations only define concat order / yaml region names. Identity
+    is sign(gamma) from the fit.
+    """
+    gamma = np.asarray(model.get('gamma', model.get('ei_sign'))).reshape(-1)
+    n1 = len(model['regions']['region1'])
+    idx = np.arange(gamma.size)
+    return {
+        'CFA_E': idx[:n1][gamma[:n1] > 0],
+        'CFA_I': idx[:n1][gamma[:n1] < 0],
+        'RFA_E': idx[n1:][gamma[n1:] > 0],
+        'RFA_I': idx[n1:][gamma[n1:] < 0],
+    }
+
+
+def sparsify_keep_top_connections(J, keep_frac, atol=1e-12):
+    """Zero all but the largest-|J| currently nonzero entries.
+
+    Already-zero weights (I-across, etc.) stay zero. keep_frac is in (0, 1].
+    """
+    J = np.asarray(J, dtype=float).copy()
+    keep_frac = float(keep_frac)
+    if keep_frac <= 0 or keep_frac > 1:
+        raise ValueError('keep_frac must be in (0, 1], got {}'.format(keep_frac))
+    live = np.abs(J) > atol
+    n_live = int(np.sum(live))
+    n_keep = max(1, int(np.round(keep_frac * n_live)))
+    if n_keep >= n_live:
+        return J, dict(n_live=n_live, n_keep=n_live, keep_frac=1.0)
+    flat = np.flatnonzero(live.ravel())
+    order = np.argsort(-np.abs(J.ravel()[flat]), kind='mergesort')
+    keep = flat[order[:n_keep]]
+    out = np.zeros_like(J)
+    out.ravel()[keep] = J.ravel()[keep]
+    return out, dict(n_live=n_live, n_keep=n_keep, keep_frac=float(n_keep) / float(n_live))
+
+
 def resolve_opto_target_population(model):
     """Dataset yaml label (CFA_I or RFA_I), not the old J-sum / region2 heuristic."""
     name = model.get('opto_target_population')
@@ -3063,15 +3163,19 @@ def resolve_opto_target_population(model):
 
 
 def opto_target_indices(model, target_population=None):
-    """Unit indices for the dataset's stimulated I population."""
+    """Dale-learned I cells in the yaml stimulated region.
+
+    Yaml CFA_I / RFA_I only chooses region + inhibitory class. Cell IDs come
+    from sign(gamma), not pickle EI labels.
+    """
     name = target_population or resolve_opto_target_population(model)
-    pops = model.get('populations') or {}
-    if name not in pops:
-        raise KeyError('opto target {} not in populations {}'.format(
-            name, list(pops.keys())))
-    idx = np.asarray(pops[name], dtype=int)
+    dale = dale_populations(model)
+    if name not in dale:
+        raise KeyError('opto target {} not in Dale groups {}'.format(
+            name, list(dale.keys())))
+    idx = np.asarray(dale[name], dtype=int)
     if idx.size == 0:
-        raise ValueError('opto target population {} is empty'.format(name))
+        raise ValueError('Dale opto target {} is empty'.format(name))
     return name, idx
 
 
@@ -3106,10 +3210,11 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
                                 target_population=None, dur=0.025, optoAmp=None,
                                 stim_onset_s=None, seed=0, reuse_wn=True,
                                 with_control=True):
-    """Trial-start rollout with the existing I-cell opto pulse on the dataset target.
+    """Trial-start rollout with the existing I-cell opto pulse.
 
-    Does not change the stim waveform (positive truncated-normal, 25 ms, optoAmp).
-    Control and opto share the same white noise and trial-start resets from Adata.
+    Yaml names the stimulated region and that I cells are targeted. Pulse
+    current is applied to Dale-learned I units in that region (sign(gamma)<0),
+    not pickle-labeled I IDs. Waveform is unchanged: +half-normal, 25 ms.
     """
     params = model['params']
     Adata = np.asarray(model['Adata'], dtype=float)
@@ -3120,6 +3225,7 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
     tauRNN = float(params['tauRNN'])
     nonLinearity = params['nonLinearity']
     number_units = int(params['number_units'])
+    input_shift = int(params.get('input_shift_data_bins', 1))
     if n_trials is None:
         n_trials = model.get('n_trials')
     if trial_length is None:
@@ -3185,8 +3291,8 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
                     H = H[:, None]
             RNN[:, tt, np.newaxis] = nonLinearity(H)
             JR = (J.dot(RNN[:, tt]).reshape((number_units, 1))
-                  + inputWN[:, tt, np.newaxis]
-                  + extra_input[:, tt, np.newaxis])
+                  + _input_at(inputWN, tt, dtFactor, input_shift)
+                  + _input_at(extra_input, tt, dtFactor, input_shift))
             H = H + dtRNN * (-H + JR) / tauRNN
         return RNN
 
@@ -4389,7 +4495,6 @@ def plot_pseudo_opto_psth(model, opto=None, title=None, **sim_kwargs):
     if opto is None:
         opto = simulate_pseudo_opto_trials(model, **sim_kwargs)
     Adata = np.asarray(opto['Adata'])
-    pred_ctrl = np.asarray(opto['pred_ctrl'])
     pred_opto = np.asarray(opto['pred_opto'])
     n_trials = int(opto['n_trials'])
     trial_len = int(opto['trial_length'])
@@ -4398,27 +4503,28 @@ def plot_pseudo_opto_psth(model, opto=None, title=None, **sim_kwargs):
     onset_ms = float(opto['stim_onset_s']) * 1000.0
     offset_ms = onset_ms + float(opto['dur']) * 1000.0
     target_name = opto['target_population']
-    pops = _ordered_populations(model['populations'])
+    dale = dale_populations(model)
     fig, axes = plt.subplots(2, 2, figsize=(10.5, 7.2), sharex=True)
     axes = axes.ravel()
-    for ax, (_s, _e, name, idx) in zip(axes, pops):
-        idx = np.asarray(idx)
+    pred_ctrl = opto.get('pred_ctrl')
+    for ax, name in zip(axes, EI_POP_ORDER):
+        idx = np.asarray(dale[name], dtype=int)
         color = POP_COLORS.get(name, 'k')
         A_tr = Adata[idx].reshape(len(idx), n_trials, trial_len)
-        C_tr = pred_ctrl[idx].reshape(len(idx), n_trials, trial_len)
         O_tr = pred_opto[idx].reshape(len(idx), n_trials, trial_len)
         A_psth = A_tr.mean(axis=(0, 1))
-        C_psth = C_tr.mean(axis=(0, 1))
         O_psth = O_tr.mean(axis=(0, 1))
         O_sem = O_tr.mean(axis=0).std(axis=0) / np.sqrt(max(n_trials, 1))
         ax.axvspan(onset_ms, offset_ms, color='0.85', lw=0, zorder=0)
         ax.plot(t_ms, A_psth, color=color, lw=1.6, label='data')
-        ax.plot(t_ms, C_psth, color='0.35', lw=1.3, ls=':', label='RNN control')
+        if pred_ctrl is not None:
+            C_tr = np.asarray(pred_ctrl)[idx].reshape(len(idx), n_trials, trial_len)
+            C_psth = C_tr.mean(axis=(0, 1))
+            ax.plot(t_ms, C_psth, color='0.35', lw=1.3, ls=':', label='RNN control')
         ax.plot(t_ms, O_psth, color='k', lw=1.6, label='RNN opto')
         ax.fill_between(t_ms, O_psth - O_sem, O_psth + O_sem, color='k', alpha=0.12, lw=0)
-        n_tgt = len(idx)
         suffix = '  TARGET' if name == target_name else ''
-        ax.set_title('pickle {}  n={}{}'.format(name, n_tgt, suffix))
+        ax.set_title('Dale {}  n={}{}'.format(name, len(idx), suffix))
         ax.set_ylabel('mean rate')
         ax.legend(fontsize=7, loc='upper right')
     axes[2].set_xlabel('time in trial (ms)')
