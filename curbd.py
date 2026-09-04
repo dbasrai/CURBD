@@ -3180,17 +3180,14 @@ def opto_target_indices(model, target_population=None):
 
 
 def _opto_inhib_pulse(n_units, n_times, target_idx, stim_mask, optoAmp):
-    """Existing inhib_only protocol: +half-normal current on target units while on."""
+    """Deterministic binary pulse on target units while the mask is on."""
     optoInp = np.zeros((n_units, n_times))
     on = np.where(np.asarray(stim_mask, dtype=bool))[0]
     target_idx = np.asarray(target_idx, dtype=int)
-    n_tgt = int(target_idx.size)
-    if n_tgt == 0 or on.size == 0:
+    if target_idx.size == 0 or on.size == 0:
         return optoInp
-    for i in on:
-        optoInp[target_idx, i] = truncnorm.rvs(
-            a=0, b=np.inf, loc=0, scale=1, size=n_tgt)
-    return float(optoAmp) * optoInp
+    optoInp[np.ix_(target_idx, on)] = float(optoAmp)
+    return optoInp
 
 
 def _trial_stim_mask(n_times, n_trials, trial_rnn, dtRNN, stim_onset_s, dur):
@@ -3210,11 +3207,13 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
                                 target_population=None, dur=0.025, optoAmp=None,
                                 stim_onset_s=None, seed=0, reuse_wn=True,
                                 with_control=True):
-    """Trial-start rollout with the existing I-cell opto pulse.
+    """Trial-start rollout with a deterministic I-cell opto pulse.
 
     Yaml names the stimulated region and that I cells are targeted. Pulse
     current is applied to Dale-learned I units in that region (sign(gamma)<0),
-    not pickle-labeled I IDs. Waveform is unchanged: +half-normal, 25 ms.
+    not pickle-labeled I IDs. At RNN resolution the binary pulse lasts `dur`.
+    On the data clock it is represented by a unit-valued binary event at its
+    onset bin, independent of the physical `optoAmp` used in the rollout.
     """
     params = model['params']
     Adata = np.asarray(model['Adata'], dtype=float)
@@ -3303,7 +3302,14 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
     i_model = np.clip(i_model, 0, n_rnn - 1)
     pred_opto = RNN_opto[:, i_model]
     pred_ctrl = None if RNN_ctrl is None else RNN_ctrl[:, i_model]
-    stim_mask_data = stim_mask[i_model]
+    stim_bin = int(round(float(stim_onset_s) / dtData))
+    stim_mask_data = np.zeros(n_data, dtype=bool)
+    opto_input_data = np.zeros((number_units, n_data), dtype=float)
+    for tr in range(n_trials):
+        event_idx = tr * trial_length + stim_bin
+        if event_idx < (tr + 1) * trial_length:
+            stim_mask_data[event_idx] = True
+            opto_input_data[target_idx, event_idx] = 1.0
     return {
         'target_population': target_name,
         'target_idx': target_idx,
@@ -3314,6 +3320,8 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
         'stim_onset_s': float(stim_onset_s),
         'stim_mask': stim_mask,
         'stim_mask_data': stim_mask_data,
+        'stim_bin': stim_bin,
+        'opto_input_data': opto_input_data,
         'RNN_ctrl': RNN_ctrl,
         'RNN_opto': RNN_opto,
         'pred_ctrl': pred_ctrl,

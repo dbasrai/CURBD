@@ -5,8 +5,10 @@ pseudo-opto trials merged with climbing.
 Climbing: 41-bin bouts cut into 8 full 100 ms TF windows (5 bins x 20 ms);
 the leftover last bin is dropped.
 
-Pseudo-opto: same I-cell pulse (onset at 20 ms = timepoint 1). One 200 ms
-trial per bout (10 bins), from t=0 so stim sits at bin 1.
+Pseudo-opto: deterministic I-cell pulse (onset at 20 ms). One 200 ms trial
+per bout (10 bins) from t=0. Default metadata marks stim at bin 1; use
+--input-event-bin 0 to label the 0-20 ms injection interval instead.
+Spikes/rates are unchanged.
 
 Merged pickles right-pad climbing to 10 bins with NaN and a valid_mask.
 Do not treat padded bins as real zeros in a loss.
@@ -360,6 +362,30 @@ def pack_spike_export(
     return out
 
 
+def relabel_spike_input_event(blob, src_bin, dst_bin):
+    """Rewrite stim_bin metadata only. Spike counts stay put."""
+    src_bin = int(src_bin)
+    dst_bin = int(dst_bin)
+    out = dict(blob)
+    if src_bin == dst_bin:
+        return out
+    if out.get('stim_bin') is None:
+        return out
+    out['stim_bin'] = dst_bin
+    out['input_event_bin'] = dst_bin
+    out['sampled_response_bin'] = src_bin
+    note = str(out.get('note', ''))
+    note = note.replace(
+        'stim at timepoint {}'.format(src_bin),
+        'input event at timepoint {}'.format(dst_bin))
+    note = note.replace(
+        'stim at bin {}'.format(src_bin),
+        'input event at bin {}'.format(dst_bin))
+    note = note.replace(' (20 ms)', ' (0-20 ms injection interval)')
+    out['note'] = note
+    return out
+
+
 def write_pickle(path, blob):
     with open(path, 'wb') as f:
         pickle.dump(blob, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -387,6 +413,10 @@ def main():
     parser.add_argument('--optoAmp', type=float, default=5.0)
     parser.add_argument('--opto-ms', type=float, default=200,
                         help='Pseudo-opto trial length from t=0 (stim at 20 ms = bin 1)')
+    parser.add_argument('--input-event-bin', type=int, default=None,
+                        help='Metadata bin of the exported input event. '
+                             'Default is stim-onset bin 1. 0 labels the '
+                             '0-20 ms injection interval. Spike counts unchanged.')
     parser.add_argument('--poisson-mult', type=float, default=1.0,
                         help='Scale reconstructed rates before Poisson (1 = count scale)')
     parser.add_argument('--seed', type=int, default=0)
@@ -485,6 +515,10 @@ def main():
         opto_bins, stim_bin = opto_trial_bins(
             opto_ms=args.opto_ms, binsize_ms=20,
             stim_onset_ms=float(sim['stim_onset_s']) * 1000.0)
+        if int(sim['stim_bin']) != int(stim_bin):
+            raise ValueError('Simulator stim bin {} != export stim bin {}'.format(
+                sim['stim_bin'], stim_bin))
+        event_bin = stim_bin if args.input_event_bin is None else int(args.input_event_bin)
         spikes_opto, opto_behav, opto_start_bin = slice_opto_trials(
             spikes_opto_bouts, opto_bins)
         opto_starts = np.array([0], dtype=np.int32)
@@ -497,21 +531,53 @@ def main():
             opto_target_population=sim['target_population'],
             opto_dur_s=float(sim['dur']),
             opto_stim_onset_s=float(sim['stim_onset_s']),
-            stim_bin=int(stim_bin),
+            stim_bin=int(event_bin),
+            input_event_bin=int(event_bin),
+            sampled_response_bin=int(stim_bin),
+            input_is_binary_pulse=True,
+            input_pulse_amplitude=1.0,
+            physical_opto_amplitude=float(args.optoAmp),
             opto_window_ms=[0, int(args.opto_ms)],
             poisson_mult=float(args.poisson_mult),
         )
-        opto = pack_spike_export(
-            stems['opto'], spikes_opto, opto_behav, opto_start_bin,
-            opto_starts, opto_bins, condition=cond_opto, extra=opto_extra,
-            note=(
-                'Pseudo-opto only ({init}, amp={amp}): +half-normal I-cell pulse '
+        if event_bin == stim_bin:
+            opto_note = (
+                'Pseudo-opto only ({init}, amp={amp}): deterministic I-cell pulse '
                 'on {tgt}. One {ms} ms trial per bout from t=0; stim at '
                 'timepoint {stim} ({onset} ms).'
                 .format(init=init_tag, amp=args.optoAmp,
                         tgt=sim['target_population'], ms=int(args.opto_ms),
-                        stim=stim_bin, onset=int(sim['stim_onset_s'] * 1000))
-            ),
+                        stim=event_bin, onset=int(sim['stim_onset_s'] * 1000))
+            )
+            merged_note = (
+                'Climbing (100 ms) + pseudo-opto (200 ms, stim at bin {stim}). '
+                'spikes is right-padded with NaN to T=10; use valid_mask or '
+                'trial_lengths in the loss. trial_lists are native length. '
+                'Do not treat padded bins as zero spikes.'
+                .format(stim=event_bin)
+            )
+        else:
+            opto_note = (
+                'Pseudo-opto only ({init}, amp={amp}): deterministic I-cell pulse '
+                'on {tgt}. One {ms} ms trial per bout from t=0; input event at '
+                'timepoint {stim} (0-20 ms injection interval). First sampled '
+                'rate response remains bin {resp} ({onset} ms).'
+                .format(init=init_tag, amp=args.optoAmp,
+                        tgt=sim['target_population'], ms=int(args.opto_ms),
+                        stim=event_bin, resp=stim_bin,
+                        onset=int(sim['stim_onset_s'] * 1000))
+            )
+            merged_note = (
+                'Climbing (100 ms) + pseudo-opto (200 ms, input event at bin '
+                '{stim}). spikes is right-padded with NaN to T=10; use '
+                'valid_mask or trial_lengths in the loss. trial_lists are '
+                'native length. Do not treat padded bins as zero spikes.'
+                .format(stim=event_bin)
+            )
+        opto = pack_spike_export(
+            stems['opto'], spikes_opto, opto_behav, opto_start_bin,
+            opto_starts, opto_bins, condition=cond_opto, extra=opto_extra,
+            note=opto_note,
             **pack_kw)
         write_pickle(spike_pickle_path(args.output_dir, stems['opto']), opto)
 
@@ -539,13 +605,7 @@ def main():
             stems['merged'], spikes_m, behav_m, start_m, opto_starts, opto_bins,
             condition=cond_m, extra=merged_extra,
             trial_lengths=lengths_m, valid_mask=mask_m,
-            note=(
-                'Climbing (100 ms) + pseudo-opto (200 ms, stim at bin {stim}). '
-                'spikes is right-padded with NaN to T=10; use valid_mask or '
-                'trial_lengths in the loss. trial_lists are native length. '
-                'Do not treat padded bins as zero spikes.'
-                .format(stim=stim_bin)
-            ),
+            note=merged_note,
             **pack_kw)
         write_pickle(spike_pickle_path(args.output_dir, stems['merged']), merged)
 
