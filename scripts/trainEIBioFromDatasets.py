@@ -160,7 +160,7 @@ def main():
     model['opto_target_population'] = data.get('opto_target_population')
     model['opto_corresponding_e_population'] = data.get('opto_corresponding_e_population')
     model['stimulated_region'] = data.get('stimulated_region')
-    model['stim_onset_s'] = data.get('stim_onset_s', 0.02)
+    model['stim_onset_s'] = data.get('stim_onset_s', 0.0)
 
     dale = curbd.check_dale_constraints(model)
     print('Dale check: intra E min={:.4g}  intra I max={:.4g}  '

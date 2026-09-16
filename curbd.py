@@ -600,14 +600,21 @@ def _binsize_ms_from_name(path):
     return None
 
 
-def _pre_ms_from_name(path):
-    match = re.search(r'pre(\d+)ms', os.path.basename(str(path)))
-    if match:
-        return int(match.group(1))
-    return None
+def _stim_onset_s_from_cfgs(yaml_cfg, snapshot_cfg):
+    """Explicit stim onset only. Do not infer it from pre{N}ms filenames.
+
+    ``pre20ms`` on climbing pickles is the clip/exclusion window around the
+    recorded laser, not the onset of the simulated pseudo-opto pulse.
+    """
+    for src in (yaml_cfg or {}, snapshot_cfg or {}):
+        if src.get('stim_onset_s') is not None:
+            return float(src['stim_onset_s'])
+        if src.get('stim_onset_ms') is not None:
+            return float(src['stim_onset_ms']) / 1000.0
+    return 0.0
 
 
-def _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg, path=None):
+def _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg):
     """opto_target_population is CFA_I (co9) or RFA_I (co10/co12), not always region2."""
     merged = {}
     for src in (yaml_cfg or {}, snapshot_cfg or {}):
@@ -629,7 +636,7 @@ def _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg, path=None):
         'opto_target_population': target,
         'opto_corresponding_e_population': e_pop,
         'stimulated_region': region,
-        'stim_onset_s': (_pre_ms_from_name(path) or 20) / 1000.0,
+        'stim_onset_s': _stim_onset_s_from_cfgs(yaml_cfg, snapshot_cfg),
     }
 
 
@@ -876,7 +883,7 @@ def load_ei_dataset(path, dtFactor=5, smooth_sigma=1.5, zscore=True,
     yaml_cfg = _load_yaml_dict(yaml_path) or {}
     snapshot_cfg = _load_yaml_dict(snapshot_path) or {}
     yaml_neurons = yaml_cfg.get('neurons') or snapshot_cfg.get('neurons') or {}
-    opto_meta = _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg, pkl_path)
+    opto_meta = _opto_fields_from_cfgs(yaml_cfg, snapshot_cfg)
 
     offset = 0
     populations = {}
@@ -1793,7 +1800,13 @@ def rollout_frozen_j(model, reset_every='train', n_trials=None, trial_length=Non
     nonLinearity = params['nonLinearity']
     number_units = int(params['number_units'])
     tData = np.asarray(model.get('tData', dtData * np.arange(Adata.shape[1])))
-    tRNN = np.asarray(model.get('tRNN', np.arange(0, tData[-1] + dtRNN, dtRNN)))
+    if tData.ndim != 1 or tData.size != Adata.shape[1]:
+        tData = dtData * np.arange(Adata.shape[1])
+    tRNN = np.asarray(model.get(
+        'tRNN', np.arange(0, tData[-1] + dtRNN, dtRNN)))
+    if (tRNN.ndim != 1 or tRNN.size == 0
+            or tRNN[-1] + 0.5 * dtRNN < tData[-1]):
+        tRNN = np.arange(0, tData[-1] + dtRNN, dtRNN)
     input_shift = int(params.get('input_shift_data_bins', 1))
     if n_trials is None or trial_length is None:
         n_trials, trial_length = _trial_shape(Adata.shape[1])
@@ -1840,7 +1853,14 @@ def rollout_frozen_j(model, reset_every='train', n_trials=None, trial_length=Non
     i_model = np.array([(np.abs(tRNN - t)).argmin() for t in tData], dtype=int)
     i_model = np.clip(i_model, 0, RNN.shape[1] - 1)
     pred = RNN[:, i_model][:, :Adata.shape[1]]
-    stats = pvar_corr_from_pred(Adata, pred, stdData=model.get('stdData'))
+    # Always normalize against the tape being evaluated. A prepared export
+    # model may replace the 40-trial training Adata with a longer session, so
+    # its stored stdData is not a valid denominator for this rollout.
+    stats = pvar_corr_from_pred(Adata, pred)
+    stored_std = model.get('stdData')
+    stats['stored_stdData'] = (
+        float(stored_std) if stored_std is not None else np.nan)
+    stats['pVar_std_source'] = 'evaluated_Adata'
     stats['RNN'] = RNN
     stats['pred'] = pred
     stats['resetPoints'] = resetPoints
@@ -3152,7 +3172,7 @@ def resolve_opto_target_population(model):
     if pkl_path:
         pkl_path, yaml_path, snapshot_path = _resolve_ei_dataset_paths(pkl_path)
         meta = _opto_fields_from_cfgs(
-            _load_yaml_dict(yaml_path), _load_yaml_dict(snapshot_path), pkl_path)
+            _load_yaml_dict(yaml_path), _load_yaml_dict(snapshot_path))
         if meta.get('opto_target_population'):
             return str(meta['opto_target_population'])
     pops = model.get('populations') or {}
@@ -3191,7 +3211,7 @@ def _opto_inhib_pulse(n_units, n_times, target_idx, stim_mask, optoAmp):
 
 
 def _trial_stim_mask(n_times, n_trials, trial_rnn, dtRNN, stim_onset_s, dur):
-    """25 ms (default) pulse on every trial, starting at the dataset pre window."""
+    """Pulse on every trial, starting at ``stim_onset_s`` (default 0)."""
     mask = np.zeros(n_times, dtype=bool)
     onset_steps = int(stim_onset_s / dtRNN)
     dur_steps = max(1, int(dur / dtRNN))
@@ -3211,9 +3231,9 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
 
     Yaml names the stimulated region and that I cells are targeted. Pulse
     current is applied to Dale-learned I units in that region (sign(gamma)<0),
-    not pickle-labeled I IDs. At RNN resolution the binary pulse lasts `dur`.
-    On the data clock it is represented by a unit-valued binary event at its
-    onset bin, independent of the physical `optoAmp` used in the rollout.
+    not pickle-labeled I IDs. At RNN resolution the pulse lasts `dur` with
+    amplitude `optoAmp`. The data-clock export is that same current sampled
+    onto ``tData``; it is not rescaled to a unit 1-hot or moved in time.
     """
     params = model['params']
     Adata = np.asarray(model['Adata'], dtype=float)
@@ -3244,7 +3264,7 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
     if optoAmp is None:
         optoAmp = params.get('ampInWN', 0.001)
     if stim_onset_s is None:
-        stim_onset_s = model.get('stim_onset_s', 0.02)
+        stim_onset_s = model.get('stim_onset_s', 0.0)
 
     trial_rnn = trial_length * dtFactor
     n_rnn = n_trials * trial_rnn
@@ -3291,7 +3311,7 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
             RNN[:, tt, np.newaxis] = nonLinearity(H)
             JR = (J.dot(RNN[:, tt]).reshape((number_units, 1))
                   + _input_at(inputWN, tt, dtFactor, input_shift)
-                  + _input_at(extra_input, tt, dtFactor, input_shift))
+                  + extra_input[:, tt].reshape((number_units, 1)))
             H = H + dtRNN * (-H + JR) / tauRNN
         return RNN
 
@@ -3303,13 +3323,8 @@ def simulate_pseudo_opto_trials(model, n_trials=None, trial_length=None,
     pred_opto = RNN_opto[:, i_model]
     pred_ctrl = None if RNN_ctrl is None else RNN_ctrl[:, i_model]
     stim_bin = int(round(float(stim_onset_s) / dtData))
-    stim_mask_data = np.zeros(n_data, dtype=bool)
-    opto_input_data = np.zeros((number_units, n_data), dtype=float)
-    for tr in range(n_trials):
-        event_idx = tr * trial_length + stim_bin
-        if event_idx < (tr + 1) * trial_length:
-            stim_mask_data[event_idx] = True
-            opto_input_data[target_idx, event_idx] = 1.0
+    opto_input_data = np.asarray(optoInp, dtype=float)[:, i_model]
+    stim_mask_data = np.any(np.abs(opto_input_data) > 0, axis=0)
     return {
         'target_population': target_name,
         'target_idx': target_idx,

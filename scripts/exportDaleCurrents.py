@@ -1,18 +1,20 @@
 #!/usr/bin/env python
 """Export Dale pop-to-pop CURBD currents, sliced to match the activity export.
 
-Fits are climbing-only. Pseudo-opto is a post-hoc amp-5 I-cell pulse on the
-fitted J. Climbing and perturb are written as separate files; RMS aggregation
-is computed inside each file from that condition's sliced currents only.
+Fits are climbing-only. Pseudo-opto is a post-hoc I-cell pulse on the fitted J
+at the physical ``optoAmp``. Climbing and perturb are written as separate
+files; RMS aggregation is computed inside each file from that condition's
+sliced currents only.
 
 Trial clock matches scripts/exportDaleLabeledSpikes.py:
 
-  Climbing: 41-bin bouts cut into 8 full 100 ms TF windows (5 bins x 20 ms);
-  leftover last bin dropped. Shape per src→trg: (n_bouts * 8, 5).
+  Climbing: frozen-J rollouts reset at the 100 ms TF boundaries, then cut into
+  8 full windows (5 bins x 20 ms); leftover last bin dropped. Shape per
+  src→trg: (n_bouts * 8, 5).
 
-  Pseudo-opto: one 200 ms trial per bout (10 bins) from t=0. Default export
-  puts the unit input event at bin 1 (20 ms sample). --input-event-bin 0
-  instead labels the 0-20 ms injection interval. Shape per src→trg: (n_bouts, 10).
+  Pseudo-opto: one 200 ms trial per bout (10 bins) from t=0. The exported
+  input is the sampled opto current (amplitude ``optoAmp``, duration ``dur``)
+  with onset at ``stim_onset_s`` (default 0). Shape per src→trg: (n_bouts, 10).
 
   {animal}_{date}_climbingOnly_{init}_curbdCurrents_daleEI.pickle
   {animal}_{date}_pseudoOptoOnly_{init}_amp{amp}_curbdCurrents_daleEI.pickle
@@ -25,9 +27,7 @@ influence_rms[source][target] : float
     Mean over target units of the sliced-term RMS. Cross-population terms are
     J[target, source] @ r_source. A population's self term is
     J[target, target] @ r_target - x_target, where r = tanh(x).
-    The input source is the designed pseudo-opto event only: zero for climbing
-    and one unit-valued binary pulse for pseudo-opto (default data bin 1;
-    bin 0 if --input-event-bin 0).
+    The input source is the sampled opto current (zero for climbing).
     Background WN is not part of the exported ground-truth intervention.
 
 currents_over_time[source][target] : (T,) float32
@@ -43,13 +43,11 @@ from __future__ import print_function
 
 import argparse
 import json
-import math
 import os
 import pickle
 import sys
 
 import numpy as np
-import numpy.random as npr
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
@@ -102,102 +100,6 @@ def load_model(path):
     if isinstance(blob, dict) and 'J' in blob:
         return blob
     raise ValueError('Unrecognized model pickle: {}'.format(path))
-
-
-def make_input_wn(model, n_rnn, seed):
-    """Same filtered WN as simulate_pseudo_opto_trials when reuse_wn is False."""
-    params = model['params']
-    dtData = float(model.get('dtData', params.get('dtData', 0.02)))
-    dtFactor = int(params['dtFactor'])
-    dtRNN = float(model.get('dtRNN', dtData / float(dtFactor)))
-    npr.seed(seed)
-    tauWN = float(params.get('tauWN', 0.1))
-    ampInWN = float(params.get('ampInWN', 0.001))
-    ampWN = math.sqrt(tauWN / dtRNN)
-    n_units = int(params['number_units'])
-    iWN = ampWN * npr.randn(n_units, n_rnn)
-    wn = np.ones((n_units, n_rnn))
-    for tt in range(1, n_rnn):
-        wn[:, tt] = iWN[:, tt] + (wn[:, tt - 1] - iWN[:, tt]) * np.exp(
-            -(dtRNN / tauWN))
-    return ampInWN * wn
-
-
-def move_last_axis_event(arr, src_bin, dst_bin):
-    """Move a one-hot along the last axis. Other axes (units, trials) unchanged."""
-    out = np.array(arr, dtype=np.float32, copy=True)
-    src_bin = int(src_bin)
-    dst_bin = int(dst_bin)
-    if src_bin == dst_bin:
-        return out
-    if src_bin < 0 or dst_bin < 0 or src_bin >= out.shape[-1] or dst_bin >= out.shape[-1]:
-        raise ValueError('event bins {} -> {} out of range for T={}'.format(
-            src_bin, dst_bin, out.shape[-1]))
-    pulse = np.array(out[..., src_bin], copy=True)
-    out[..., src_bin] = 0
-    out[..., dst_bin] = pulse
-    return out
-
-
-def retarget_bout_events(drive, n_tr, tlen, target_idx, src_bin, dst_bin):
-    """Move per-bout 1-hots on the unsliced (N, n_trials * T) drive."""
-    out = np.array(drive, dtype=np.float32, copy=True)
-    target_idx = np.asarray(target_idx, dtype=int)
-    src_bin = int(src_bin)
-    dst_bin = int(dst_bin)
-    if src_bin == dst_bin or target_idx.size == 0:
-        return out
-    for tr in range(int(n_tr)):
-        src = tr * int(tlen) + src_bin
-        dst = tr * int(tlen) + dst_bin
-        if src >= out.shape[1] or dst >= out.shape[1]:
-            continue
-        pulse = np.array(out[target_idx, src], copy=True)
-        out[target_idx, src] = 0
-        out[target_idx, dst] = pulse
-    return out
-
-
-def relabel_current_input_event(blob, src_bin, dst_bin):
-    """Rewrite only the exported input 1-hot. J r terms are left untouched."""
-    src_bin = int(src_bin)
-    dst_bin = int(dst_bin)
-    out = dict(blob)
-    if src_bin == dst_bin:
-        return out
-    pops = list(out.get('target_order', POPS))
-    sources = list(out.get('source_order', SOURCES))
-    over = out.get('currents_over_time')
-    if over is not None and 'input' in over:
-        over_in = dict(over)
-        over_in['input'] = dict(over['input'])
-        for trg in pops:
-            over_in['input'][trg] = move_last_axis_event(
-                over['input'][trg], src_bin, dst_bin)
-        out['currents_over_time'] = over_in
-    per = out.get('currents_per_trial')
-    if per is not None and 'input' in per:
-        per_in = dict(per)
-        per_in['input'] = dict(per['input'])
-        for trg in pops:
-            per_in['input'][trg] = move_last_axis_event(
-                per['input'][trg], src_bin, dst_bin)
-        out['currents_per_trial'] = per_in
-    arr = out.get('currents_over_time_array')
-    if arr is not None and 'input' in sources:
-        arr = np.array(arr, dtype=np.float32, copy=True)
-        i_src = sources.index('input')
-        arr[i_src] = move_last_axis_event(arr[i_src], src_bin, dst_bin)
-        out['currents_over_time_array'] = arr
-    out['stim_bin'] = dst_bin
-    out['input_event_bin'] = dst_bin
-    out['sampled_response_bin'] = src_bin
-    note = str(out.get('note', ''))
-    note = note.replace(
-        'unit-valued binary pulse at bin 1',
-        'unit-valued binary pulse at bin {}'.format(dst_bin))
-    out['note'] = note
-    return out
 
 
 def pop_current(J, dale, rates, src, trg):
@@ -329,15 +231,13 @@ def pack_condition(condition, rms, over_time, per_trial, meta):
             'same-population self term merges intrinsic decay as '
             'J[trg,trg] @ r_trg - x_trg, with r=tanh(x). Therefore the '
             'population terms are on the unscaled right-hand-side current '
-            'scale of tau*dx/dt. The exported input is the deterministic '
-            'experimental event indicator only: zero for climbing and a '
-            'unit-valued binary pulse at bin {bin} for pseudo-opto. Its amplitude '
-            'is independent of the physical optoAmp used to generate activity. '
-            'Background filtered WN used '
-            'during simulation is intentionally excluded from this GT input. '
-            'currents_over_time is the unit- and trial-mean on the 20 ms '
-            'sliced clock. Climbing and pseudo-opto are never mixed.'
-            .format(cond=condition, bin=int(meta.get('stim_bin', 1)))
+            'scale of tau*dx/dt. The exported input is the sampled opto '
+            'current (amplitude optoAmp) at the same data bins as the rates; '
+            'zero for climbing. Background filtered WN used during simulation '
+            'is intentionally excluded from this GT input. currents_over_time '
+            'is the unit- and trial-mean on the 20 ms sliced clock. Climbing '
+            'and pseudo-opto are never mixed.'
+            .format(cond=condition)
         ),
     )
     return blob
@@ -363,8 +263,8 @@ def shared_meta(model, model_path, dataset, init_tag, dale, shift, dtData,
         self_term_includes_decay=True,
         self_term_definition='J[target,target] @ r_target - x_target',
         hidden_from_rate='arctanh(clip(r, -0.999, 0.999))',
-        input_definition='unit-valued binary intervention event',
-        input_units='binary_indicator',
+        input_definition='sampled opto current at rollout amplitude',
+        input_units='optoAmp',
         background_wn_exported_as_input=False,
         reset_every_rnn=int(reset_every),
         n_behavioral_trials=int(n_behav),
@@ -407,7 +307,7 @@ def condition_meta(base, sim, t_ms, n_tr, tlen, behav, start_bin, win_starts,
 
 
 def export_one(model_path, dataset, init_tag, opto_amp, seed, fit_trials=40,
-               opto_ms=200, reset_every=25, input_event_bin=None):
+               opto_ms=200, reset_every=25):
     model = load_model(model_path)
     dtFactor = int(model['params']['dtFactor'])
     shift = int(model['params'].get('input_shift_data_bins', 1))
@@ -421,30 +321,28 @@ def export_one(model_path, dataset, init_tag, opto_amp, seed, fit_trials=40,
     tlen_bout = int(data['trial_length'])
     n_fit_behav = min(int(fit_trials), n_bouts)
     Ttot = n_bouts * tlen_bout
-    Adata = np.asarray(model['Adata'], dtype=float)[:, :Ttot]
     nonLinearity_inv = model['params'].get('nonLinearity_inv', np.arctanh)
-    climb_hidden = nonLinearity_inv(np.clip(Adata, -0.999, 0.999))
-    n_rnn = Ttot * dtFactor
-    wn = make_input_wn(model, n_rnn, seed)
-    model['inputWN'] = wn
     climb_drive = np.zeros((J.shape[0], Ttot), dtype=np.float32)
+
+    print('Simulating generated climbing init={}  {} bouts'.format(
+        init_tag, n_bouts))
+    climb_sim = curbd.rollout_frozen_j(
+        model, reset_every=int(reset_every), n_trials=n_bouts,
+        trial_length=tlen_bout, reuse_wn=False, seed=seed)
+    climb_pred = np.asarray(climb_sim['pred'], dtype=float)[:, :Ttot]
+    climb_hidden = nonLinearity_inv(np.clip(climb_pred, -0.999, 0.999))
 
     print('Simulating pseudo-opto init={} amp={}  {} bouts'.format(
         init_tag, opto_amp, n_bouts))
     sim = curbd.simulate_pseudo_opto_trials(
         model, n_trials=n_bouts, trial_length=tlen_bout,
-        optoAmp=opto_amp, seed=seed, reuse_wn=True, with_control=False)
+        optoAmp=opto_amp, seed=seed, reuse_wn=False, with_control=False)
     pred = np.asarray(sim['pred_opto'], dtype=float)[:, :Ttot]
     opto_hidden = nonLinearity_inv(np.clip(pred, -0.999, 0.999))
     opto_drive = np.asarray(sim['opto_input_data'], dtype=np.float32)[:, :Ttot]
-    event_bin = int(sim['stim_bin']) if input_event_bin is None else int(input_event_bin)
-    if event_bin != int(sim['stim_bin']):
-        opto_drive = retarget_bout_events(
-            opto_drive, n_bouts, tlen_bout, sim['target_idx'],
-            int(sim['stim_bin']), event_bin)
 
     climb_bouts = unit_currents_bouts(
-        J, dale, Adata, climb_hidden, climb_drive, n_bouts, tlen_bout)
+        J, dale, climb_pred, climb_hidden, climb_drive, n_bouts, tlen_bout)
     opto_bouts = unit_currents_bouts(
         J, dale, pred, opto_hidden, opto_drive, n_bouts, tlen_bout)
 
@@ -472,21 +370,30 @@ def export_one(model_path, dataset, init_tag, opto_amp, seed, fit_trials=40,
         base, sim, climb_t_ms, n_climb, T_climb, climb_behav, climb_start,
         starts, n_fit_behav,
         extra=dict(
-            source='climbing_recorded',
+            source='curbd_generated_climbing',
+            generation='frozen_j_rollout',
+            initialization='recorded_state_at_each_tf_window_start',
+            recorded_rates_used_for_currents=False,
+            rollout_seed=int(seed),
+            rollout_pVar=float(climb_sim['pVar']),
+            rollout_corr=float(climb_sim['corr']),
+            rollout_Adata_std=float(climb_sim['Adata_std']),
+            stored_training_stdData=float(climb_sim['stored_stdData']),
+            pVar_std_source=climb_sim['pVar_std_source'],
+            training_final_pVar=float(model['pVars'][-1]),
             leftover_bin_dropped=True,
         ))
     opto_meta = condition_meta(
         base, sim, opto_t_ms, n_opto, T_opto, opto_behav, opto_start,
         np.array([0], dtype=np.int32), n_fit_behav,
         extra=dict(
-            source='pseudo_opto',
-            stim_bin=int(event_bin),
-            input_event_bin=int(event_bin),
-            sampled_response_bin=int(sim['stim_bin']),
+            source='curbd_generated_pseudo_opto',
+            generation='frozen_j_rollout',
+            recorded_rates_used_for_currents=False,
+            rollout_seed=int(seed),
+            stim_bin=int(sim['stim_bin']),
             opto_window_ms=[0, int(opto_ms)],
-            input_is_binary_pulse=True,
-            input_pulse_amplitude=1.0,
-            physical_opto_amplitude=float(opto_amp),
+            input_pulse_amplitude=float(opto_amp),
         ))
     return (
         pack_condition('climbing', climb_rms, climb_t, climb_tr, climb_meta),
@@ -537,11 +444,7 @@ def main():
     parser.add_argument('--fit-trials', type=int, default=40,
                         help='First N behavioral trials used to fit the Dale models')
     parser.add_argument('--opto-ms', type=float, default=200,
-                        help='Pseudo-opto trial length from t=0 (stim at 20 ms = bin 1)')
-    parser.add_argument('--input-event-bin', type=int, default=None,
-                        help='Data-bin of the exported unit input 1-hot. '
-                             'Default is the stim-onset bin (1). 0 labels the '
-                             '0-20 ms injection interval. Does not change J or rates.')
+                        help='Pseudo-opto trial length from t=0')
     parser.add_argument('--reset-every', type=int, default=25,
                         help='Teacher-force period in RNN steps (25 = 100 ms at dtFactor=5)')
     parser.add_argument('--output-dir', default=None)
@@ -565,9 +468,8 @@ def main():
         climb_blob, opto_blob = export_one(
             model_path, args.dataset, init_tag, args.optoAmp, args.seed,
             fit_trials=args.fit_trials, opto_ms=args.opto_ms,
-            reset_every=args.reset_every, input_event_bin=args.input_event_bin)
-        copy_dir = None if args.input_event_bin is not None else os.path.dirname(
-            os.path.abspath(model_path))
+            reset_every=args.reset_every)
+        copy_dir = os.path.dirname(os.path.abspath(model_path))
         write_export(climb_blob, outdir, copy_dir=copy_dir)
         write_export(opto_blob, outdir, copy_dir=copy_dir)
         print('  init={}  Dale {}  sparse_percent={}  climbing {} x {}  opto {} x {}'.format(

@@ -1,14 +1,14 @@
 #!/usr/bin/env python
-"""Export recorded spike counts plus final Dale E/I labels, and optional
-pseudo-opto trials merged with climbing.
+"""Export CURBD-generated spike counts plus final Dale E/I labels.
 
-Climbing: 41-bin bouts cut into 8 full 100 ms TF windows (5 bins x 20 ms);
-the leftover last bin is dropped.
+Climbing: frozen-J control rollouts reset at each teacher-force boundary, then
+Poisson sampled and cut into 8 full 100 ms windows (5 bins x 20 ms). The
+leftover last bin is dropped. Recorded counts supply initial conditions and
+per-neuron scaling only; they are not exported as activity.
 
-Pseudo-opto: deterministic I-cell pulse (onset at 20 ms). One 200 ms trial
-per bout (10 bins) from t=0. Default metadata marks stim at bin 1; use
---input-event-bin 0 to label the 0-20 ms injection interval instead.
-Spikes/rates are unchanged.
+Pseudo-opto: deterministic I-cell pulse at stim_onset_s (default 0) with
+the physical optoAmp. One 200 ms trial per bout (10 bins) from t=0.
+Spikes/rates are the simulated series; metadata is not relabeled.
 
 Merged pickles right-pad climbing to 10 bins with NaN and a valid_mask.
 Do not treat padded bins as real zeros in a loss.
@@ -25,6 +25,9 @@ import os
 import pickle
 import sys
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -38,11 +41,11 @@ CO9 = os.path.join(
     'co9_12122023_climbing_pre20ms_post180ms_binsize20_'
     'reclassEI_inact0_35_mod0_25_aligned.pkl')
 HALF_FLIP = os.path.join(
-    ROOT, 'outputs', 'dale_horizon_balance',
+    ROOT, 'outputs', 'dale_horizon_balance_sparse80',
     'co9_DALE_i0rank_half_flip_reset25', 'model.pickle')
 I0_SIGN = os.path.join(
-    ROOT, 'outputs', 'dale_scalar_co9',
-    'DALE_i0sign_reset25', 'model.pickle')
+    ROOT, 'outputs', 'dale_horizon_balance_sparse0',
+    'co9_DALE_i0sign_reset25', 'model.pickle')
 
 
 def session_tag_from_dataset(pkl_path):
@@ -182,11 +185,8 @@ def cut_tf_trials(spikes, dtFactor=5, reset_every=25):
     return out, behav, start_bin, tf_bins, starts
 
 
-def opto_trial_bins(opto_ms=200, binsize_ms=20, stim_onset_ms=20):
-    """One trial from t=0, long enough to include stim at timepoint 1.
-
-    20 ms bins: bin 0 is 0–20 ms, stim at 20 ms is bin 1, 200 ms is 10 bins.
-    """
+def opto_trial_bins(opto_ms=200, binsize_ms=20, stim_onset_ms=0):
+    """One trial from t=0, long enough to include the stim onset bin."""
     n_bins = int(round(float(opto_ms) / float(binsize_ms)))
     stim_bin = int(round(float(stim_onset_ms) / float(binsize_ms)))
     if n_bins < stim_bin + 1:
@@ -246,7 +246,7 @@ def prepare_opto_sim_model(model, data):
     model['opto_corresponding_e_population'] = data.get(
         'opto_corresponding_e_population')
     model['stimulated_region'] = data.get('stimulated_region')
-    model['stim_onset_s'] = data.get('stim_onset_s', 0.02)
+    model['stim_onset_s'] = data.get('stim_onset_s', 0.0)
     model['n_trials'] = data['n_trials']
     model['trial_length'] = data['trial_length']
     model['inputWN'] = None
@@ -261,6 +261,114 @@ def tanh_rates_to_counts(rates, scaler, train_max, poisson_mult=1.0, seed=0):
     lam = np.maximum(lam, 0.0)
     spikes_tn = rng.poisson(lam).astype(np.int16)
     return spikes_tn.T
+
+
+def generated_climbing_counts(model, n_trials, trial_length, reset_every,
+                              poisson_mult=1.0, seed=0):
+    """Frozen-J climbing rollout, inverse-scaled and independently Poisson sampled.
+
+    Each exported teacher-force interval starts from its recorded-data state.
+    No recorded spike count is copied into the generated output.
+    """
+    sim = curbd.rollout_frozen_j(
+        model, reset_every=int(reset_every), n_trials=int(n_trials),
+        trial_length=int(trial_length), reuse_wn=False, seed=int(seed))
+    scaler = model.get('scaler')
+    if scaler is None:
+        raise ValueError('Need a StandardScaler to map tanh rates to counts')
+    counts_nt = tanh_rates_to_counts(
+        sim['pred'], scaler, model['train_max'],
+        poisson_mult=poisson_mult, seed=int(seed) + 2)
+    expected = int(n_trials) * int(trial_length)
+    if counts_nt.shape[1] != expected:
+        raise ValueError(
+            'Generated climbing length {} != {} trials x {} bins'
+            .format(counts_nt.shape[1], n_trials, trial_length))
+    return counts_nt.reshape(
+        counts_nt.shape[0], int(n_trials), int(trial_length)), sim
+
+
+def save_climbing_trial_average_png(model, sim, n_trials, trial_length,
+                                    reset_every, init_tag, path):
+    """Plot recorded target and generated frozen-J population means."""
+    A = np.asarray(model['Adata']).reshape(
+        model['Adata'].shape[0], int(n_trials), int(trial_length))
+    P = np.asarray(sim['pred']).reshape(A.shape)
+    dt_ms = float(model.get('dtData', 0.02)) * 1000.0
+    t_ms = np.arange(int(trial_length)) * dt_ms
+    reset_ms = int(reset_every) * float(model['dtRNN']) * 1000.0
+    pops = curbd.dale_populations(model)
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True)
+    for ax, (name, idx) in zip(axes.ravel(), pops.items()):
+        idx = np.asarray(idx, dtype=int)
+        ax.plot(t_ms, A[idx].mean(axis=(0, 1)), color='black',
+                linewidth=1.8, label='recorded target')
+        ax.plot(t_ms, P[idx].mean(axis=(0, 1)), color='#1f77b4',
+                linewidth=1.8, label='generated CURBD')
+        for x in np.arange(reset_ms, t_ms[-1] + 0.5 * reset_ms, reset_ms):
+            ax.axvline(x, color='0.75', linewidth=0.8, linestyle=':')
+        ax.axhline(0, color='0.8', linewidth=0.7)
+        ax.set_title('{} (n={})'.format(name, len(idx)))
+        ax.set_ylabel('mean tanh activity')
+    axes[-1, 0].set_xlabel('time in behavioral bout (ms)')
+    axes[-1, 1].set_xlabel('time in behavioral bout (ms)')
+    axes[0, 0].legend(frameon=False, fontsize=8)
+    fig.suptitle(
+        '{} climbing: recorded target vs generated CURBD '
+        '(pVar={:.3f}, corr={:.3f})'.format(
+            init_tag, sim['pVar'], sim['corr']))
+    fig.text(
+        0.5, 0.01,
+        'Population and trial mean over {} bouts; dotted lines are {} ms '
+        'state-reset boundaries. Pre-Poisson rates.'.format(
+            n_trials, int(round(reset_ms))),
+        ha='center', fontsize=8)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    fig.savefig(path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print('Wrote', path)
+
+
+def save_pseudo_opto_trial_average_png(model, sim, opto_bins, init_tag, path):
+    """Plot matched control and pseudo-opto generated population means."""
+    n_trials = int(sim['n_trials'])
+    trial_length = int(sim['trial_length'])
+    shape = (model['Adata'].shape[0], n_trials, trial_length)
+    ctrl = np.asarray(sim['pred_ctrl']).reshape(shape)[:, :, :int(opto_bins)]
+    opto = np.asarray(sim['pred_opto']).reshape(shape)[:, :, :int(opto_bins)]
+    dt_ms = float(model.get('dtData', 0.02)) * 1000.0
+    t_ms = np.arange(int(opto_bins)) * dt_ms
+    stim_ms = float(sim['stim_onset_s']) * 1000.0
+    pops = curbd.dale_populations(model)
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True)
+    for ax, (name, idx) in zip(axes.ravel(), pops.items()):
+        idx = np.asarray(idx, dtype=int)
+        ax.plot(t_ms, ctrl[idx].mean(axis=(0, 1)), color='black',
+                linewidth=1.8, label='matched control')
+        ax.plot(t_ms, opto[idx].mean(axis=(0, 1)), color='#d62728',
+                linewidth=1.8, label='pseudo-opto amp {:g}'.format(
+                    sim['optoAmp']))
+        ax.axvline(stim_ms, color='0.45', linewidth=1.0, linestyle='--')
+        ax.axhline(0, color='0.8', linewidth=0.7)
+        ax.set_title('{} (n={})'.format(name, len(idx)))
+        ax.set_ylabel('mean tanh activity')
+    axes[-1, 0].set_xlabel('time from trial start (ms)')
+    axes[-1, 1].set_xlabel('time from trial start (ms)')
+    axes[0, 0].legend(frameon=False, fontsize=8)
+    fig.suptitle(
+        '{} pseudo-opto: generated amp {:g} vs matched control'.format(
+            init_tag, sim['optoAmp']))
+    fig.text(
+        0.5, 0.01,
+        'Population and trial mean over {} generated trials; pulse starts at '
+        '{:g} ms on {}. Post-hoc simulation, not a perturbation fit. '
+        'Pre-Poisson rates.'.format(
+            n_trials, stim_ms, sim['target_population']),
+        ha='center', fontsize=8)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.95))
+    fig.savefig(path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print('Wrote', path)
 
 
 def regroup_trial_lists(spikes, region, label, trial_lengths=None):
@@ -362,30 +470,6 @@ def pack_spike_export(
     return out
 
 
-def relabel_spike_input_event(blob, src_bin, dst_bin):
-    """Rewrite stim_bin metadata only. Spike counts stay put."""
-    src_bin = int(src_bin)
-    dst_bin = int(dst_bin)
-    out = dict(blob)
-    if src_bin == dst_bin:
-        return out
-    if out.get('stim_bin') is None:
-        return out
-    out['stim_bin'] = dst_bin
-    out['input_event_bin'] = dst_bin
-    out['sampled_response_bin'] = src_bin
-    note = str(out.get('note', ''))
-    note = note.replace(
-        'stim at timepoint {}'.format(src_bin),
-        'input event at timepoint {}'.format(dst_bin))
-    note = note.replace(
-        'stim at bin {}'.format(src_bin),
-        'input event at bin {}'.format(dst_bin))
-    note = note.replace(' (20 ms)', ' (0-20 ms injection interval)')
-    out['note'] = note
-    return out
-
-
 def write_pickle(path, blob):
     with open(path, 'wb') as f:
         pickle.dump(blob, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -412,16 +496,14 @@ def main():
                         help='Comma-separated init tags to export (50_50, i0init)')
     parser.add_argument('--optoAmp', type=float, default=5.0)
     parser.add_argument('--opto-ms', type=float, default=200,
-                        help='Pseudo-opto trial length from t=0 (stim at 20 ms = bin 1)')
-    parser.add_argument('--input-event-bin', type=int, default=None,
-                        help='Metadata bin of the exported input event. '
-                             'Default is stim-onset bin 1. 0 labels the '
-                             '0-20 ms injection interval. Spike counts unchanged.')
+                        help='Pseudo-opto trial length from t=0')
     parser.add_argument('--poisson-mult', type=float, default=1.0,
                         help='Scale reconstructed rates before Poisson (1 = count scale)')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--no-opto', action='store_true',
                         help='Only write the climbing TF-window pickle')
+    parser.add_argument('--no-plots', action='store_true',
+                        help='Do not write trial-average tanh-rate PNGs')
     parser.add_argument('--output-dir', default=None)
     parser.add_argument('--fit-trials', type=int, default=40,
                         help='First N behavioral trials used to fit the Dale models')
@@ -435,8 +517,8 @@ def main():
         args.output_dir = os.path.join(
             ROOT, 'outputs', 'dale_label_export', session)
 
-    spikes, pickle_pop, pickle_lab = load_raw_spikes(args.dataset)
-    n, n_trials, trial_len = spikes.shape
+    recorded_spikes, pickle_pop, pickle_lab = load_raw_spikes(args.dataset)
+    n, n_trials, trial_len = recorded_spikes.shape
     half = load_model(args.half_flip_model)
     i0s = load_model(args.i0sign_model)
     h = dale_fields(half)
@@ -448,10 +530,9 @@ def main():
         raise ValueError('Region split differs between models')
 
     n_fit_behav = min(int(args.fit_trials), n_trials)
-    spikes_tf, behav_trial, tf_start_bin, tf_bins, win_starts = cut_tf_trials(
-        spikes, dtFactor=args.dtFactor, reset_every=args.reset_every)
+    win_starts, tf_bins = tf_window_bins(
+        trial_len, dtFactor=args.dtFactor, reset_every=args.reset_every)
     tf_ms = int(tf_bins) * 20
-    cond_climb = np.array(['climbing'] * spikes_tf.shape[1])
     init_specs = {
         '50_50': dict(model=half, fields=h, path=args.half_flip_model),
         'i0init': dict(model=i0s, fields=s, path=args.i0sign_model),
@@ -463,11 +544,21 @@ def main():
             unknown, list(init_specs)))
 
     os.makedirs(args.output_dir, exist_ok=True)
-    data = None if args.no_opto else curbd.load_ei_dataset(
+    data = curbd.load_ei_dataset(
         args.dataset, dtFactor=args.dtFactor, smooth_sigma=1.5, zscore=False)
 
     for init_tag in wanted:
         spec = init_specs[init_tag]
+        sim_model = prepare_opto_sim_model(spec['model'], data)
+        print('Simulating generated climbing init={}  {} bouts'.format(
+            init_tag, n_trials))
+        spikes_climb_bouts, climb_sim = generated_climbing_counts(
+            sim_model, n_trials=n_trials, trial_length=trial_len,
+            reset_every=args.reset_every, poisson_mult=args.poisson_mult,
+            seed=args.seed)
+        spikes_tf, behav_trial, tf_start_bin = cut_windows(
+            spikes_climb_bouts, win_starts, tf_bins)
+        cond_climb = np.array(['climbing'] * spikes_tf.shape[1])
         pack_kw = dict(
             pickle_pop=pickle_pop, pickle_lab=pickle_lab,
             dale=spec['fields'], dale_model=spec['model'],
@@ -481,35 +572,58 @@ def main():
         climb = pack_spike_export(
             stems['climbing'], spikes_tf, behav_trial, tf_start_bin,
             win_starts, tf_bins, condition=cond_climb,
-            extra=dict(source='climbing_recorded', init_tag=init_tag),
+            extra=dict(
+                source='curbd_generated_climbing',
+                init_tag=init_tag,
+                generation='frozen_j_rollout_then_poisson',
+                initialization='recorded_state_at_each_tf_window_start',
+                recorded_counts_exported=False,
+                poisson_mult=float(args.poisson_mult),
+                rollout_seed=int(args.seed),
+                poisson_seed=int(args.seed) + 2,
+                rollout_pVar=float(climb_sim['pVar']),
+                rollout_corr=float(climb_sim['corr']),
+                rollout_Adata_std=float(climb_sim['Adata_std']),
+                stored_training_stdData=float(climb_sim['stored_stdData']),
+                pVar_std_source=climb_sim['pVar_std_source'],
+                training_final_pVar=float(spec['model']['pVars'][-1]),
+            ),
             note=(
-                'Climbing-only ({init}): each spikes[:, trial, :] is one '
-                'teacher-force window: {bins} bins x 20 ms = {ms} ms. '
-                'Windows start at {starts}; leftover last bin dropped.'
+                'CURBD-generated climbing-only ({init}): frozen-J rates are '
+                'initialized from the recorded state at each teacher-force '
+                'boundary, generated within each {bins}-bin ({ms} ms) window, '
+                'inverse-scaled per neuron, and Poisson sampled. No recorded '
+                'spike count is exported. Windows start at {starts}; leftover '
+                'last bin dropped.'
                 .format(init=init_tag, bins=tf_bins, ms=tf_ms,
                         starts=list(map(int, win_starts)))
             ),
             **pack_kw)
         write_pickle(spike_pickle_path(args.output_dir, stems['climbing']), climb)
+        if not args.no_plots:
+            save_climbing_trial_average_png(
+                sim_model, climb_sim, n_trials, trial_len, args.reset_every,
+                init_tag, os.path.join(
+                    args.output_dir,
+                    '{}_trialAverage_tanhRates.png'.format(stems['climbing'])))
         print('  init={}  E/I {}/{}  {} windows/climbing-trial'.format(
             init_tag, cts['n_E'], cts['n_I'], len(win_starts)))
         if args.no_opto:
             continue
 
-        opto_model = prepare_opto_sim_model(spec['model'], data)
         print('Simulating pseudo-opto init={} target={} amp={}  {} bouts'.format(
-            init_tag, opto_model.get('opto_target_population'), args.optoAmp,
+            init_tag, sim_model.get('opto_target_population'), args.optoAmp,
             data['n_trials']))
         sim = curbd.simulate_pseudo_opto_trials(
-            opto_model, n_trials=data['n_trials'],
+            sim_model, n_trials=data['n_trials'],
             trial_length=data['trial_length'], optoAmp=args.optoAmp,
-            seed=args.seed, reuse_wn=False, with_control=False)
-        scaler = opto_model['scaler']
+            seed=args.seed, reuse_wn=False, with_control=True)
+        scaler = sim_model['scaler']
         if scaler is None:
             raise ValueError('Need a StandardScaler to map tanh rates to counts')
         counts_nt = tanh_rates_to_counts(
-            sim['pred_opto'], scaler, opto_model['train_max'],
-            poisson_mult=args.poisson_mult, seed=args.seed + 2)
+            sim['pred_opto'], scaler, sim_model['train_max'],
+            poisson_mult=args.poisson_mult, seed=args.seed + 3)
         spikes_opto_bouts = counts_nt.reshape(
             n, int(sim['n_trials']), int(sim['trial_length']))
         opto_bins, stim_bin = opto_trial_bins(
@@ -518,68 +632,53 @@ def main():
         if int(sim['stim_bin']) != int(stim_bin):
             raise ValueError('Simulator stim bin {} != export stim bin {}'.format(
                 sim['stim_bin'], stim_bin))
-        event_bin = stim_bin if args.input_event_bin is None else int(args.input_event_bin)
         spikes_opto, opto_behav, opto_start_bin = slice_opto_trials(
             spikes_opto_bouts, opto_bins)
         opto_starts = np.array([0], dtype=np.int32)
         cond_opto = np.array(['pseudo_opto'] * spikes_opto.shape[1])
         opto_extra = dict(
-            source='pseudo_opto',
+            source='curbd_generated_pseudo_opto',
             init_tag=init_tag,
             opto_model=os.path.abspath(spec['path']),
             optoAmp=float(args.optoAmp),
             opto_target_population=sim['target_population'],
             opto_dur_s=float(sim['dur']),
             opto_stim_onset_s=float(sim['stim_onset_s']),
-            stim_bin=int(event_bin),
-            input_event_bin=int(event_bin),
-            sampled_response_bin=int(stim_bin),
-            input_is_binary_pulse=True,
-            input_pulse_amplitude=1.0,
-            physical_opto_amplitude=float(args.optoAmp),
+            stim_bin=int(stim_bin),
             opto_window_ms=[0, int(args.opto_ms)],
             poisson_mult=float(args.poisson_mult),
+            generation='frozen_j_rollout_then_poisson',
+            recorded_counts_exported=False,
+            rollout_seed=int(args.seed),
+            poisson_seed=int(args.seed) + 3,
         )
-        if event_bin == stim_bin:
-            opto_note = (
-                'Pseudo-opto only ({init}, amp={amp}): deterministic I-cell pulse '
-                'on {tgt}. One {ms} ms trial per bout from t=0; stim at '
-                'timepoint {stim} ({onset} ms).'
-                .format(init=init_tag, amp=args.optoAmp,
-                        tgt=sim['target_population'], ms=int(args.opto_ms),
-                        stim=event_bin, onset=int(sim['stim_onset_s'] * 1000))
-            )
-            merged_note = (
-                'Climbing (100 ms) + pseudo-opto (200 ms, stim at bin {stim}). '
-                'spikes is right-padded with NaN to T=10; use valid_mask or '
-                'trial_lengths in the loss. trial_lists are native length. '
-                'Do not treat padded bins as zero spikes.'
-                .format(stim=event_bin)
-            )
-        else:
-            opto_note = (
-                'Pseudo-opto only ({init}, amp={amp}): deterministic I-cell pulse '
-                'on {tgt}. One {ms} ms trial per bout from t=0; input event at '
-                'timepoint {stim} (0-20 ms injection interval). First sampled '
-                'rate response remains bin {resp} ({onset} ms).'
-                .format(init=init_tag, amp=args.optoAmp,
-                        tgt=sim['target_population'], ms=int(args.opto_ms),
-                        stim=event_bin, resp=stim_bin,
-                        onset=int(sim['stim_onset_s'] * 1000))
-            )
-            merged_note = (
-                'Climbing (100 ms) + pseudo-opto (200 ms, input event at bin '
-                '{stim}). spikes is right-padded with NaN to T=10; use '
-                'valid_mask or trial_lengths in the loss. trial_lists are '
-                'native length. Do not treat padded bins as zero spikes.'
-                .format(stim=event_bin)
-            )
+        opto_note = (
+            'Pseudo-opto only ({init}, amp={amp}): deterministic I-cell pulse '
+            'on {tgt}. One {ms} ms trial per bout from t=0; stim at '
+            'timepoint {stim} ({onset} ms).'
+            .format(init=init_tag, amp=args.optoAmp,
+                    tgt=sim['target_population'], ms=int(args.opto_ms),
+                    stim=stim_bin, onset=int(sim['stim_onset_s'] * 1000))
+        )
+        merged_note = (
+            'CURBD-generated climbing (100 ms) + pseudo-opto (200 ms, '
+            'stim at bin {stim}). '
+            'spikes is right-padded with NaN to T=10; use valid_mask or '
+            'trial_lengths in the loss. trial_lists are native length. '
+            'Do not treat padded bins as zero spikes.'
+            .format(stim=stim_bin)
+        )
         opto = pack_spike_export(
             stems['opto'], spikes_opto, opto_behav, opto_start_bin,
             opto_starts, opto_bins, condition=cond_opto, extra=opto_extra,
             note=opto_note,
             **pack_kw)
         write_pickle(spike_pickle_path(args.output_dir, stems['opto']), opto)
+        if not args.no_plots:
+            save_pseudo_opto_trial_average_png(
+                sim_model, sim, opto_bins, init_tag, os.path.join(
+                    args.output_dir,
+                    '{}_trialAverage_tanhRates.png'.format(stems['opto'])))
 
         pad_c, mask_c, len_c = pad_trials_right(spikes_tf, opto_bins)
         pad_o, mask_o, len_o = pad_trials_right(spikes_opto, opto_bins)
@@ -590,10 +689,13 @@ def main():
         start_m = np.concatenate([tf_start_bin, opto_start_bin])
         cond_m = np.concatenate([cond_climb, cond_opto])
         merged_extra = dict(opto_extra)
+        merged_extra.pop('poisson_seed', None)
         merged_extra.update(
-            source='climbing_plus_pseudo_opto',
+            source='curbd_generated_climbing_plus_pseudo_opto',
             padded=True,
             pad_value=np.nan,
+            climbing_poisson_seed=int(args.seed) + 2,
+            opto_poisson_seed=int(args.seed) + 3,
             n_climbing_windows=int(spikes_tf.shape[1]),
             n_opto_windows=int(spikes_opto.shape[1]),
             climbing_windows_per_bout=int(len(win_starts)),

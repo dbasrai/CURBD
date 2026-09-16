@@ -59,7 +59,7 @@ def attach_dataset_opto(model, dataset_path):
     model['opto_corresponding_e_population'] = data.get(
         'opto_corresponding_e_population')
     model['stimulated_region'] = data.get('stimulated_region')
-    model['stim_onset_s'] = data.get('stim_onset_s', 0.02)
+    model['stim_onset_s'] = data.get('stim_onset_s', 0.0)
     tlen = int(data['trial_length'])
     model['trial_length'] = tlen
     model['n_trials'] = int(model['Adata'].shape[1]) // tlen
