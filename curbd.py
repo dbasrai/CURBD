@@ -950,13 +950,20 @@ def load_ei_dataset(path, dtFactor=5, smooth_sigma=1.5, zscore=True,
 def make_reset_points(n_trials, trial_length, dtFactor, reset_every=None):
     """RNN-time indices to teacher-force H from data.
 
-    Trial starts are always included. If reset_every is set (in RNN steps),
-    extra resets are inserted inside each trial, matching curbdSweepHPs
-    num_reset=100 on the old 5–10 ms pipeline.
+    'none' / 't0' — only the initial state. No later overwrite, including
+    at bout boundaries of a concatenated tape.
+    None / 'trialstarts' — one reset at each bout start.
+    'mid' — bout start plus one reset at the middle bin of each bout.
+    int — bout starts plus a reset every this many RNN steps.
     """
     trial_rnn = int(trial_length) * int(dtFactor)
     starts = np.arange(int(n_trials), dtype=np.int32) * trial_rnn
-    if reset_every is None or int(reset_every) <= 0:
+    if reset_every in ('none', 't0'):
+        return np.array([0], dtype=np.int32)
+    if reset_every in ('mid', 'middle'):
+        mid = starts + (int(trial_length) // 2) * int(dtFactor)
+        return np.unique(np.concatenate([starts, mid])).astype(np.int32)
+    if reset_every is None or reset_every == 'trialstarts' or int(reset_every) <= 0:
         return starts
     chunks = [np.arange(int(s), int(s) + trial_rnn, int(reset_every), dtype=np.int32)
               for s in starts]
@@ -1788,6 +1795,7 @@ def rollout_frozen_j(model, reset_every='train', n_trials=None, trial_length=Non
       'train' — the schedule the model was trained with
       None / 'trialstarts' — reset H at trial starts only
       int — trial starts plus every this many RNN steps (e.g. 25 = 100 ms)
+      'mid' — bout start plus one reset at the middle bin
       'none' — only the t=0 hidden state from data; no later resets
     """
     params = model['params']
@@ -1817,8 +1825,9 @@ def rollout_frozen_j(model, reset_every='train', n_trials=None, trial_length=Non
     elif reset_every in ('none', 't0'):
         resetPoints = np.array([], dtype=np.int32)
     else:
+        step = reset_every if isinstance(reset_every, str) else int(reset_every)
         resetPoints = make_reset_points(
-            n_trials, trial_length, dtFactor, int(reset_every))
+            n_trials, trial_length, dtFactor, step)
     reset_set = set(int(x) for x in resetPoints)
 
     if reuse_wn and model.get('inputWN') is not None:
